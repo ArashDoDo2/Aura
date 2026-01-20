@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'vpn_manager.dart';
+import 'aura_bridge.dart';
 
 void main() {
   runApp(const AuraApp());
@@ -29,7 +29,6 @@ class AuraHomePage extends StatefulWidget {
 }
 
 class _AuraHomePageState extends State<AuraHomePage> {
-  final VpnManager _vpnManager = VpnManager();
   final TextEditingController _dnsController = TextEditingController();
   final TextEditingController _domainController = TextEditingController();
   
@@ -53,7 +52,7 @@ class _AuraHomePageState extends State<AuraHomePage> {
 
     try {
       if (_isConnected) {
-        await _vpnManager.stopAura();
+        AuraBridge.stopAura();
         setState(() {
           _isConnected = false;
           _statusMessage = 'Disconnected';
@@ -72,7 +71,7 @@ class _AuraHomePageState extends State<AuraHomePage> {
           return;
         }
 
-        await _vpnManager.startAura(dns, domain);
+        AuraBridge.startAura(dns, domain);
         setState(() {
           _isConnected = true;
           _statusMessage = dns.isEmpty 

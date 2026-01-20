@@ -1,73 +1,77 @@
-# Flutter + Go Bridge for Aura DNS Tunnel
+# Flutter + Go Bridge for Aura DNS Tunnel (Dart FFI)
 
-This guide explains how to build and run the complete Flutter app with Go engine integration.
+This guide explains how to build and run the complete Flutter app with Go engine integration via Dart FFI (avoiding NDK/gomobile issues).
 
 ## 🏗️ Architecture
 
 ```
 Flutter UI (Dart)
-    ↕ MethodChannel
-Android Native (Kotlin)
-    ↕ JNI (gomobile)
-Go Engine (Aura)
+    ↕ Dart FFI (dart:ffi)
+  libaura.so (Go C-shared library)
+    ↕
+  Go SOCKS5 Proxy
+    ↕
+WhatsApp Server (port 5222)
 ```
+
+**Why FFI instead of gomobile?**
+- ✅ No NDK platform/API mismatch errors
+- ✅ Direct C interop—faster, simpler
+- ✅ No need for MethodChannel/VpnService
+- ✅ Works on Windows, Linux, macOS for testing
 
 ## 📋 Prerequisites
 
 ### Required Tools
 - **Go**: 1.21+ ([download](https://go.dev/dl/))
 - **Flutter**: 3.0+ ([install guide](https://flutter.dev/docs/get-started/install))
-- **Android Studio** with:
-  - Android SDK (API 21+)
-  - Android NDK (r23+)
-  - Kotlin plugin
-- **gomobile**: `go install golang.org/x/mobile/cmd/gomobile@latest`
+- **Android NDK**: 25.2.9519653+ ([prebuilt recommended](https://developer.android.com/ndk/downloads))
+- **Android SDK**: API 21+
+- **Android Studio**: Recommended for device/emulator management
 
-### Environment Setup
-```bash
-# Initialize gomobile
-gomobile init
-
-# Set Android paths (Windows)
-$env:ANDROID_HOME = "C:\Users\YourName\AppData\Local\Android\Sdk"
-$env:ANDROID_NDK_HOME = "$env:ANDROID_HOME\ndk\25.2.9519653"
-
-# Verify installations
+### Verify Installations
+```powershell
 go version
 flutter --version
-gomobile version
+adb --version
+
+# Check NDK
+Get-ChildItem "$env:LOCALAPPDATA\Android\Sdk\ndk"
 ```
 
 ## 🔨 Build Steps
 
-### Step 1: Build Go Engine (.aar)
+### Step 1: Build Go Shared Library
 
 ```powershell
+# Set NDK env vars (adjust version as needed)
+$env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
+$env:ANDROID_NDK_HOME = "$env:ANDROID_HOME\ndk\29.0.14206865"
+$env:CC = "$env:ANDROID_NDK_HOME\toolchains\llvm\prebuilt\windows-x86_64\bin\aarch64-linux-android21-clang.cmd"
+$env:CGO_ENABLED = "1"
+$env:GOOS = "android"
+$env:GOARCH = "arm64"
+
 # Navigate to project root
 cd C:\dev\Aura\Aura
 
-# Build Android library
-gomobile bind -target=android/arm64,android/amd64 -o aura.aar ./internal
+# Build shared library
+go build -buildmode=c-shared -o libaura.so ./bridge.go
 
 # Verify output
-ls aura.aar, aura-sources.jar
+Get-Item libaura.so | Select-Object Name, Length
 ```
 
-**Output files:**
-- `aura.aar` - Android library (contains Go code)
-- `aura-sources.jar` - Source mappings for debugging
+**Output:** `libaura.so` (~7 MB) + `libaura.h` (C header)
 
-### Step 2: Copy AAR to Flutter Project
+### Step 2: Deploy .so to Flutter
 
 ```powershell
-# Create libs directory
-New-Item -ItemType Directory -Force flutter_aura\android\app\libs
+# Create jniLibs directory tree
+New-Item -ItemType Directory -Force flutter_aura\android\app\src\main\jniLibs\arm64-v8a
 
-# Copy AAR
-Copy-Item aura.aar flutter_aura\android\app\libs\
-
-# Verify
-ls flutter_aura\android\app\libs\aura.aar
+# Copy .so file
+Copy-Item libaura.so flutter_aura\android\app\src\main\jniLibs\arm64-v8a\
 ```
 
 ### Step 3: Build Flutter App
@@ -76,7 +80,7 @@ ls flutter_aura\android\app\libs\aura.aar
 # Navigate to Flutter project
 cd flutter_aura
 
-# Get dependencies
+# Get dependencies (includes package:ffi)
 flutter pub get
 
 # Build APK
@@ -85,32 +89,19 @@ flutter build apk --release
 # Or build for debugging
 flutter build apk --debug
 
-# Output: build/app/outputs/flutter-apk/app-release.apk
+# Output: build/app/outputs/flutter-apk/app-debug.apk (143 MB)
 ```
 
 ## 🚀 Running the App
 
-### Option 1: Run on Connected Device
+### Option 1: Install and Run
 
 ```powershell
-# List devices
-flutter devices
+# Install built APK
+adb install -r build/app/outputs/flutter-apk/app-debug.apk
 
-# Run on device
-flutter run
-
-# Or install APK directly
-adb install build/app/outputs/flutter-apk/app-release.apk
-```
-
-### Option 2: Run in Debug Mode
-
-```powershell
-# Hot reload enabled
-flutter run --debug
-
-# With verbose logging
-flutter run -v
+# Check logs
+adb logcat -s Flutter
 ```
 
 ## 🧪 Testing
@@ -119,24 +110,28 @@ flutter run -v
 
 ```powershell
 # Build and test client
+cd C:\dev\Aura\Aura
 go build -o aura-client ./cmd/client
-./aura-client -dns 1.1.1.1:53 -domain tunnel.example.com.
 
-# Verify SOCKS5 proxy
+# Run with system DNS
+.\aura-client -domain tunnel.example.com.
+
+# Or with custom DNS
+.\aura-client -dns 1.1.1.1:53 -domain tunnel.example.com.
+
+# Verify SOCKS5 proxy on 127.0.0.1:1080
 Test-NetConnection -ComputerName 127.0.0.1 -Port 1080
 ```
 
-### Test Flutter UI
+### Test Flutter App on Android Device
 
-```powershell
-cd flutter_aura
-
-# Run tests
-flutter test
-
-# Run integration tests (if available)
-flutter drive --target=test_driver/app.dart
-```
+1. Start app and grant VPN permission
+2. Enter domain (e.g., `tunnel.example.com.`)
+3. Leave DNS empty (system) or custom (e.g., `1.1.1.1:53`)
+4. Tap **Connect**
+5. Open WhatsApp and send message
+6. Check device logs: `adb logcat | Select-String 'Aura'`
+7. Tap **Disconnect** to stop
 
 ## 🔧 Configuration
 
