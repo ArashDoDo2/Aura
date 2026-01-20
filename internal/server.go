@@ -70,31 +70,24 @@ type session struct {
 	tlsHandshakePending  bool
 	tlsHandshakeExpected int
 	tlsHandshakeBuffer   []byte
-	firstTLSWritten      bool
+	handshakeDone        bool
 	noDelayWasSet        bool
 }
 
 func (s *session) handleUpstreamData(data []byte, qf *QueryFields) {
-	if s.firstTLSWritten {
+	if s.handshakeDone {
 		s.writeDirect(data, qf)
 		return
 	}
 
 	if !s.tlsHandshakePending {
-		if len(data) > 0 && data[0] == 0x16 {
-			s.tlsHandshakePending = true
-			s.tlsHandshakeBuffer = append([]byte(nil), data...)
-			if len(s.tlsHandshakeBuffer) >= 5 {
-				s.tlsHandshakeExpected = 5 + int(binary.BigEndian.Uint16(s.tlsHandshakeBuffer[3:5]))
-			} else {
-				s.tlsHandshakeExpected = -1
-			}
-			s.logHandshakeProgress(qf)
-			s.flushHandshakeIfReady(qf)
+		if len(data) == 0 || data[0] != 0x16 {
+			// Not a TLS handshake / abort buffering
+			s.handshakeDone = true
+			s.writeDirect(data, qf)
 			return
 		}
-		s.writeDirect(data, qf)
-		return
+		s.tlsHandshakePending = true
 	}
 
 	s.tlsHandshakeBuffer = append(s.tlsHandshakeBuffer, data...)
@@ -133,11 +126,11 @@ func (s *session) flushHandshakeIfReady(qf *QueryFields) {
 		log.Printf("WhatsApp handshake write error session=%s: %v", qf.SessionID, err)
 	} else {
 		log.Printf("Forwarded TLS handshake (%d bytes) session=%s seq=%s", n, qf.SessionID, qf.Seq)
-		log.Printf("Handshake flushed: wrote %d bytes in one write", n)
 	}
 	s.setNoDelay(true)
 
-	s.firstTLSWritten = true
+	s.handshakeDone = true
+	log.Printf("Handshake flush: wrote %d bytes (single write) session=%s", len(handshake), qf.SessionID)
 	if len(leftover) > 0 {
 		s.writeDirect(leftover, qf)
 	}
