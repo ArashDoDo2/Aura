@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^cd /workspaces/Aura && go mod init github\\.com/ArashDoDo2/Aura 2>/dev/null \\|\\| true && go mod tidy$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

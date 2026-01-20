@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">AuraMobileClient</string>
+    <string name="connect">اتصال</string>
+    <string name="disconnect">قطع اتصال</string>
+    <string name="connected">وضعیت: متصل</string>
+    <string name="disconnected">وضعیت: قطع</string>
+</resources>

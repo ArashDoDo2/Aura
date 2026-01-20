@@ -47,18 +47,13 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
-// EncodeDataToLabel تبدیل دیتای باینری به Base32 برای استفاده در DNS
-func EncodeDataToLabel(data []byte) string {
-	return strings.ToLower(b32Encoder.EncodeToString(data))
-}
-
-func (c *AuraClient) StartSocks5(ctx context.Context) error {
+// StartSocks5 starts the SOCKS5 proxy and returns a channel for errors and a stop function.
+func (c *AuraClient) StartSocks5(ctx context.Context, domain string) error {
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", Socks5Port))
 	if err != nil {
 		return err
 	}
 	defer ln.Close()
-	log.Printf("Aura SOCKS5 listening on :%d", Socks5Port)
 
 	for {
 		conn, err := ln.Accept()
@@ -67,8 +62,8 @@ func (c *AuraClient) StartSocks5(ctx context.Context) error {
 			case <-ctx.Done():
 				return ctx.Err()
 			default:
-				log.Printf("Accept error: %v", err)
-				continue
+				// For mobile, just return error to caller
+				return err
 			}
 		}
 		go c.handleSocks5Conn(ctx, conn)
@@ -97,13 +92,11 @@ func (c *AuraClient) handleSocks5Conn(ctx context.Context, conn net.Conn) {
 		return
 	} // فقط دستور CONNECT پشتیبانی می‌شود
 
-	var host string
 	switch buf[3] {
 	case 0x01: // IPv4
 		if _, err := io.ReadFull(conn, buf[:4+2]); err != nil {
 			return
 		}
-		host = net.IP(buf[:4]).String()
 	case 0x03: // Domain name
 		if _, err := io.ReadFull(conn, buf[:1]); err != nil {
 			return
@@ -112,7 +105,6 @@ func (c *AuraClient) handleSocks5Conn(ctx context.Context, conn net.Conn) {
 		if _, err := io.ReadFull(conn, buf[:dlen+2]); err != nil {
 			return
 		}
-		host = string(buf[:dlen])
 	}
 
 	// ما فقط ترافیک واتس‌اپ را اجازه می‌دهیم
@@ -158,7 +150,7 @@ func (c *AuraClient) sendDNSPacket(data []byte) {
 	c.Seq++
 	c.Mutex.Unlock()
 
-	label := EncodeDataToLabel(data)
+	label := strings.ToLower(b32Encoder.EncodeToString(data))
 	nonce := randomHex(4)
 
 	// ساختار: [Nonce]-[Sequence]-[SessionID].[Data].aura.net.
