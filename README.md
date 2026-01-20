@@ -44,17 +44,25 @@ sudo ./aura-server -domain yourdomain.com. -addr :53
 Set up SOCKS5 proxy with configurable parameters:
 
 ```bash
-# Environment variables
+# Using system DNS resolver (recommended for most users)
+export AURA_DOMAIN="yourdomain.com."
+export AURA_SOCKS5_PORT="1080"
+./aura-client
+
+# With custom DNS server
 export AURA_DNS_SERVER="1.1.1.1:53"
 export AURA_DOMAIN="yourdomain.com."
 export AURA_SOCKS5_PORT="1080"
-
-# Start client
 ./aura-client
 
 # Or with flags
 ./aura-client -dns 1.1.1.1:53 -domain yourdomain.com. -port 1080
+
+# Use system resolver (leave DNS empty)
+./aura-client -dns "" -domain yourdomain.com. -port 1080
 ```
+
+> **Pro Tip:** Omit `AURA_DNS_SERVER` to automatically use your system's DNS configuration. Perfect for dynamic network environments!
 
 ## 📦 Installation
 
@@ -90,9 +98,11 @@ gomobile bind -target=android/arm64,android/amd64 -o aura.aar ./internal
 - `AURA_LISTEN_ADDR` - Listen address (default `:53`)
 
 **Client:**
-- `AURA_DNS_SERVER` - Upstream DNS resolver (default `8.8.8.8:53`)
+- `AURA_DNS_SERVER` - Upstream DNS resolver (optional, defaults to system resolver)
 - `AURA_DOMAIN` - Target domain matching server configuration
 - `AURA_SOCKS5_PORT` - Local SOCKS5 proxy port (default `1080`)
+
+> **Note:** If `AURA_DNS_SERVER` is not specified, the client will automatically use your system's default DNS resolver (reading from `/etc/resolv.conf`). This is ideal for mobile apps where users may not know DNS server addresses.
 
 ### DNS Configuration
 
@@ -142,14 +152,23 @@ a3f1-0001-b2c4.mzxw6ytboi.tunnel.example.com.
 import internal.Internal
 
 Internal.startAuraClient(
-    "1.1.1.1:53",        // DNS server
-    "tunnel.example.com.", // Domain
-    1080                  // SOCKS5 port
+    "",                      // DNS server (empty = use system resolver)
+    "tunnel.example.com.",   // Domain
+    1080                     // SOCKS5 port
+)
+
+// With custom DNS server
+Internal.startAuraClient(
+    "1.1.1.1:53",           // Custom DNS server
+    "tunnel.example.com.",  // Domain
+    1080                    // SOCKS5 port
 )
 
 // Stop proxy
 Internal.stopAuraClient()
 ```
+
+> **Tip for Android UI:** Leave DNS server field empty to automatically use device's network DNS settings. This simplifies configuration for end users.
 
 **Full VpnService implementation available in [COMPLETE-ARCHITECTURE.md](COMPLETE-ARCHITECTURE.md)**
 
