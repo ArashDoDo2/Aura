@@ -5,7 +5,7 @@
 ### Core Components
 
 #### 1. Server (internal/server.go)
-- ✅ Authoritative DNS server for aura.net zone
+- ✅ Authoritative DNS server for your custom domain
 - ✅ Handles AAAA queries only (16-byte IPv6 payloads)
 - ✅ Session management with 60-second timeout
 - ✅ **Port 5222 enforcement** - Hardcoded WhatsApp text-only connection
@@ -33,7 +33,7 @@ conn, err := net.DialTimeout("tcp", WhatsAppHost+":5222", 5*time.Second)
 ```go
 // Cache Busting: Random nonce per query
 nonce := randomHex(4)
-qname := fmt.Sprintf("%s-%04x-%s.%s.%s", nonce, seq, c.SessionID, label, DomainSuffix)
+qname := fmt.Sprintf("%s-%04x-%s.%s.%s", nonce, seq, c.SessionID, label, c.Domain)
 ```
 
 #### 3. Mobile Wrapper (internal/mobile.go)
@@ -52,10 +52,10 @@ qname := fmt.Sprintf("%s-%04x-%s.%s.%s", nonce, seq, c.SessionID, label, DomainS
 
 #### Packet Structure
 ```
-[Nonce(4hex)]-[Seq(4hex)]-[SessionID(4hex)].[Base32Data].aura.net.
+[Nonce(4hex)]-[Seq(4hex)]-[SessionID(4hex)].[Base32Data].tunnel.example.com.
 ```
 
-Example: `a3f1-0001-b2c4.mzxw6ytboi.aura.net.`
+Example: `a3f1-0001-b2c4.mzxw6ytboi.tunnel.example.com.`
 
 #### Components
 - **Nonce**: 4-char hex - Random value for cache busting
@@ -166,7 +166,7 @@ gomobile bind -target=android/arm64,android/amd64 -o aura.aar ./internal
 ### Use in Android App
 ```kotlin
 // Start proxy
-Internal.startAuraClient("1.1.1.1:53", "aura.net")
+Internal.startAuraClient("1.1.1.1:53", "tunnel.example.com.")
 
 // Stop proxy
 Internal.stopAuraClient()
@@ -183,13 +183,13 @@ Complete example provided in COMPLETE-ARCHITECTURE.md showing:
 
 ### Termux (Client)
 ```bash
-./aura-client -dns 1.1.1.1:53 -domain aura.net
+./aura-client -dns 1.1.1.1:53 -domain tunnel.example.com.
 # SOCKS5 proxy running on 127.0.0.1:1080
 ```
 
 ### VPS (Server)
 ```bash
-sudo ./aura-server -addr :53 -zone aura.net
+sudo ./aura-server -addr :53 -domain tunnel.example.com.
 # Authoritative DNS listening on port 53
 ```
 
@@ -226,8 +226,8 @@ sudo ./aura-server -addr :53 -zone aura.net
 ## Next Steps for Deployment
 
 ### 1. Server Deployment
-1. Get Australian VPS
-2. Register domain (e.g., aura.net)
+1. Get a VPS (any provider/region)
+2. Register a domain (e.g., tunnel.example.com)
 3. Configure NS records to point to VPS IP
 4. Deploy aura-server binary
 5. Run with sudo on port 53
@@ -240,7 +240,7 @@ sudo ./aura-server -addr :53 -zone aura.net
 5. Test with WhatsApp
 
 ### 3. Testing
-1. Verify DNS resolution: `dig @server-ip test.aura.net AAAA`
+1. Verify DNS resolution: `dig @server-ip test.tunnel.example.com AAAA`
 2. Test client in Termux
 3. Monitor server logs for sessions
 4. Validate WhatsApp connectivity

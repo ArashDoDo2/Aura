@@ -13,7 +13,7 @@ import (
 
 func main() {
 	dnsServer := flag.String("dns", getEnv("AURA_DNS_SERVER", ""), "DNS server address (empty = use system resolver)")
-	domain := flag.String("domain", getEnv("AURA_DOMAIN", "aura.net."), "Target domain")
+	domain := flag.String("domain", getEnv("AURA_DOMAIN", ""), "Target domain (e.g., tunnel.example.com.)")
 	port := flag.Int("port", getEnvInt("AURA_SOCKS5_PORT", 1080), "SOCKS5 proxy port")
 	flag.Parse()
 

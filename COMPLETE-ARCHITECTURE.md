@@ -14,7 +14,7 @@ Aura is a DNS-based tunneling system designed to proxy WhatsApp text messages th
 │  127.0.0.1:1080 │         │              │         │  (Australia)     │         │             │
 └─────────────────┘         └──────────────┘         └──────────────────┘         └─────────────┘
      DNS queries →              Forward →                Process query              Connect to
-     AAAA records              to aura.net               Extract data               e1.whatsapp.net:5222
+     AAAA records            to your domain             Extract data               e1.whatsapp.net:5222
 ```
 
 ## Protocol Specification
@@ -22,7 +22,7 @@ Aura is a DNS-based tunneling system designed to proxy WhatsApp text messages th
 ### DNS Query Format
 Every DNS query follows this structure:
 ```
-[Nonce]-[Seq]-[SessionID].[Base32Data].aura.net.
+[Nonce]-[Seq]-[SessionID].[Base32Data].tunnel.example.com.
 ```
 
 **Components:**
@@ -33,7 +33,7 @@ Every DNS query follows this structure:
 
 **Example Query:**
 ```
-a3f1-0001-b2c4.mzxw6ytboi.aura.net.
+a3f1-0001-b2c4.mzxw6ytboi.tunnel.example.com.
 ```
 
 ### Data Flow
@@ -51,7 +51,7 @@ a3f1-0001-b2c4.mzxw6ytboi.aura.net.
 #### Downstream (Server → Client)
 1. **Client Polling**: Send special query with seq=`ffff`
    ```
-   [nonce]-ffff-[sessionID]..aura.net.
+   [nonce]-ffff-[sessionID]..tunnel.example.com.
    ```
 2. **Server Response**:
    - Check session buffer for pending data
@@ -138,7 +138,7 @@ var (
 
 // StartAuraClient starts the Aura SOCKS5 proxy on 127.0.0.1:1080
 // dnsServer example: "1.1.1.1:53"
-// domain example: "aura.net"
+// domain example: "tunnel.example.com."
 func StartAuraClient(dnsServer, domain string) error {
     if globalClient != nil {
         StopAuraClient()
@@ -230,7 +230,7 @@ class AuraVpnService : VpnService() {
         vpnInterface = builder.establish()
         
         // Start Aura SOCKS5 proxy
-        Internal.startAuraClient("1.1.1.1:53", "aura.net")
+        Internal.startAuraClient("1.1.1.1:53", "tunnel.example.com.")
         
         // TODO: Route VPN traffic to 127.0.0.1:1080 (SOCKS5)
         // This requires packet forwarding implementation
@@ -293,9 +293,9 @@ cd Aura
 # Build server
 go build -o aura-server ./cmd/server
 
-# Configure DNS zone delegation (point aura.net NS to your server IP)
+# Configure DNS zone delegation (point your domain NS to your server IP)
 # Run server (requires root for port 53)
-sudo ./aura-server -addr :53 -zone aura.net
+sudo ./aura-server -addr :53 -domain tunnel.example.com.
 ```
 
 ### Client Testing (Termux on Android)
@@ -309,7 +309,7 @@ cd Aura
 go build -o aura-client ./cmd/client
 
 # Run client
-./aura-client -dns 1.1.1.1:53 -domain aura.net
+./aura-client -dns 1.1.1.1:53 -domain tunnel.example.com.
 
 # Client starts SOCKS5 proxy on 127.0.0.1:1080
 
@@ -436,8 +436,8 @@ Aura/
 
 ## Deployment Checklist
 
-### Server (Australian VPS)
-- [ ] Register domain (e.g., aura.net)
+### Server
+- [ ] Register a domain (e.g., tunnel.example.com)
 - [ ] Configure DNS NS records to point to your server IP
 - [ ] Open firewall port 53 (UDP)
 - [ ] Build and deploy aura-server
@@ -456,14 +456,14 @@ Aura/
 ## Troubleshooting
 
 ### Client Cannot Connect
-- Verify DNS server is reachable: `nslookup aura.net 1.1.1.1`
+- Verify DNS server is reachable: `nslookup tunnel.example.com 1.1.1.1`
 - Check SOCKS5 proxy: `netstat -an | grep 1080`
 - Enable debug logging in client.go
 
 ### Server Not Responding
 - Verify DNS service running: `sudo netstat -ulnp | grep :53`
 - Check server logs for errors
-- Test DNS resolution: `dig @<server-ip> test.aura.net AAAA`
+- Test DNS resolution: `dig @<server-ip> test.tunnel.example.com AAAA`
 
 ### WhatsApp Not Working
 - Confirm only port 5222 traffic attempted (check server logs)

@@ -25,7 +25,7 @@ pkg install golang git
 ```bash
 git clone https://github.com/ArashDoDo2/Aura
 cd Aura
-go run cmd/aura-client.go --dns YOUR_SERVER_IP:53 --domain aura.net.
+go run ./cmd/client -dns YOUR_SERVER_IP:53 -domain tunnel.example.com.
 ```
 
 4. Configure WhatsApp to use proxy `127.0.0.1:1080`

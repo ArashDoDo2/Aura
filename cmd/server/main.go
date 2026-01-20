@@ -11,7 +11,7 @@ import (
 func main() {
 	// Configuration via flags or environment variables
 	addr := flag.String("addr", getEnv("AURA_LISTEN_ADDR", ":53"), "Listen address (default :53)")
-	domain := flag.String("domain", getEnv("AURA_DOMAIN", "aura.net."), "Authoritative domain (e.g., aura.net.)")
+	domain := flag.String("domain", getEnv("AURA_DOMAIN", ""), "Authoritative domain (e.g., tunnel.example.com.)")
 	flag.Parse()
 
 	log.Printf("Starting Aura DNS Server")
