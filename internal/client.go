@@ -1,8 +1,10 @@
 package internal
 
 import (
+	"bufio"
 	"context"
 	"encoding/base32"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -18,9 +20,9 @@ import (
 
 const (
 	DefaultSocks5Port = 1080
-	MaxChunkSize      = 30                    // Fragment TCP data into 30-byte chunks
-	MaxDataLabelLen   = 63                    // DNS label max length
-	PollInterval      = 50 * time.Millisecond // Sequential polling interval (faster downstream polling)
+	MaxChunkSize      = 30                     // Fragment TCP data into 30-byte chunks
+	MaxDataLabelLen   = 63                     // DNS label max length
+	PollInterval      = 100 * time.Millisecond // Sequential polling interval (faster downstream polling)
 )
 
 // b32Encoder: Base32 with no padding, lowercase for DNS compatibility
@@ -33,6 +35,18 @@ type AuraClient struct {
 	SessionID  string
 	Mutex      sync.Mutex
 	Seq        uint16
+}
+
+type bufferedConn struct {
+	net.Conn
+	reader         *bufio.Reader
+	tlsFastPath    bool
+	firstTLSRecord []byte
+	tlsRecordSent  bool
+}
+
+func (b *bufferedConn) Read(p []byte) (int, error) {
+	return b.reader.Read(p)
 }
 
 func NewAuraClient(dnsServer, domain string, port int) *AuraClient {
@@ -115,44 +129,85 @@ func (c *AuraClient) StartSocks5(ctx context.Context) error {
 func (c *AuraClient) handleSocks5Conn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
+	reader := bufio.NewReader(conn)
+	first, err := reader.Peek(1)
+	if err != nil {
+		return
+	}
+
+	bc := &bufferedConn{Conn: conn, reader: reader}
+	if first[0] != 0x05 {
+		if first[0] == 0x16 {
+			if err := c.bufferTLSRecord(reader, bc); err != nil {
+				return
+			}
+		}
+
+		log.Printf("Transparent TCP stream detected, skipping SOCKS handshake")
+		c.handleTunnel(ctx, bc)
+		return
+	}
+
 	// SOCKS5 Handshake
 	buf := make([]byte, 262)
-	if _, err := io.ReadFull(conn, buf[:2]); err != nil {
+	if _, err := io.ReadFull(reader, buf[:2]); err != nil {
 		return
 	}
 
 	nMethods := int(buf[1])
-	if _, err := io.ReadFull(conn, buf[:nMethods]); err != nil {
+	if _, err := io.ReadFull(reader, buf[:nMethods]); err != nil {
 		return
 	}
 	conn.Write([]byte{0x05, 0x00}) // No Auth
 
-	if _, err := io.ReadFull(conn, buf[:4]); err != nil {
+	if _, err := io.ReadFull(reader, buf[:4]); err != nil {
 		return
 	}
 	if buf[1] != 0x01 {
 		return
 	} // Only CONNECT supported
 
-	// Read destination address
+	// Read destination address (read but ignore)
 	switch buf[3] {
 	case 0x01: // IPv4
-		if _, err := io.ReadFull(conn, buf[:4+2]); err != nil {
+		if _, err := io.ReadFull(reader, buf[:4+2]); err != nil {
 			return
 		}
 	case 0x03: // Domain name
-		if _, err := io.ReadFull(conn, buf[:1]); err != nil {
+		if _, err := io.ReadFull(reader, buf[:1]); err != nil {
 			return
 		}
 		dlen := int(buf[0])
-		if _, err := io.ReadFull(conn, buf[:dlen+2]); err != nil {
+		if _, err := io.ReadFull(reader, buf[:dlen+2]); err != nil {
 			return
 		}
 	}
 
 	// Send success response
 	conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
-	c.handleTunnel(ctx, conn)
+	c.handleTunnel(ctx, bc)
+}
+
+func (c *AuraClient) bufferTLSRecord(reader *bufio.Reader, bc *bufferedConn) error {
+	header := make([]byte, 5)
+	if _, err := io.ReadFull(reader, header); err != nil {
+		return err
+	}
+
+	length := int(binary.BigEndian.Uint16(header[3:5]))
+	record := make([]byte, 5+length)
+	copy(record, header)
+	if length > 0 {
+		if _, err := io.ReadFull(reader, record[5:]); err != nil {
+			return err
+		}
+	}
+
+	bc.firstTLSRecord = append([]byte(nil), record...)
+	bc.tlsFastPath = true
+	bc.tlsRecordSent = false
+	log.Printf("Buffered TLS record (%d bytes) before tunneling", len(record))
+	return nil
 }
 
 func (c *AuraClient) handleTunnel(ctx context.Context, conn net.Conn) {
@@ -178,6 +233,12 @@ func (c *AuraClient) handleTunnel(ctx context.Context, conn net.Conn) {
 
 // tcpToDNS: Fragment TCP data into 30-byte chunks, Base32 encode, send as DNS AAAA queries
 func (c *AuraClient) tcpToDNS(ctx context.Context, conn net.Conn) {
+	if bc, ok := conn.(*bufferedConn); ok && bc.tlsFastPath && !bc.tlsRecordSent && len(bc.firstTLSRecord) > 0 {
+		c.flushTLSRecord(bc.firstTLSRecord)
+		bc.tlsRecordSent = true
+		bc.firstTLSRecord = nil
+	}
+
 	buf := make([]byte, MaxChunkSize)
 	for {
 		select {
@@ -220,6 +281,40 @@ func (c *AuraClient) sendDNSPacket(data []byte) {
 	m.SetQuestion(qname, dns.TypeAAAA)
 	log.Printf("DNS uplink chunk seq=0x%04x len=%d domain=%s", seq, len(data), qname)
 	c.sendQuery(m)
+}
+
+func (c *AuraClient) sendDNSPacketFast(data []byte) {
+	c.Mutex.Lock()
+	seq := c.Seq
+	c.Seq++
+	c.Mutex.Unlock()
+
+	nonce := randomHex(4)
+	label := strings.ToLower(b32Encoder.EncodeToString(data))
+	snippet := label
+	if len(snippet) > 10 {
+		snippet = snippet[:10]
+	}
+	log.Printf("Fast-path chunk seq=0x%04x first10=%s len=%d", seq, snippet, len(label))
+
+	qname := fmt.Sprintf("%s-%04x-%s.%s.%s", nonce, seq, c.SessionID, label, c.Domain)
+
+	m := new(dns.Msg)
+	m.SetQuestion(qname, dns.TypeAAAA)
+	log.Printf("Fast-path DNS uplink seq=0x%04x len=%d domain=%s", seq, len(data), qname)
+	go c.sendQuery(m)
+}
+
+func (c *AuraClient) flushTLSRecord(record []byte) {
+	log.Printf("Flushing TLS record fast path (%d bytes)", len(record))
+	for offset := 0; offset < len(record); {
+		end := offset + MaxChunkSize
+		if end > len(record) {
+			end = len(record)
+		}
+		c.sendDNSPacketFast(record[offset:end])
+		offset = end
+	}
 }
 
 func (c *AuraClient) sendQuery(m *dns.Msg) {

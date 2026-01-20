@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"encoding/binary"
 	"fmt"
 	"log"
 	"net"
@@ -54,17 +55,114 @@ func ParseQueryName(name, domain string) (*QueryFields, error) {
 }
 
 const (
-	WhatsAppHost   = "e1.whatsapp.net"
-	WhatsAppPort   = 5222 // Default text-only port to filter media/CDN traffic
-	SessionTimeout = 60 * time.Second
-	MaxIPv6Payload = 16
+	WhatsAppHost       = "e1.whatsapp.net"
+	WhatsAppPort       = 5222 // Default text-only port to filter media/CDN traffic
+	SessionTimeout     = 60 * time.Second
+	MaxIPv6Payload     = 16
+	MaxAAAAPerResponse = 16 // Cap AAAA records per DNS response
 )
 
 type session struct {
-	conn     net.Conn
-	buffer   []byte
-	lastSeen time.Time
-	mu       sync.Mutex
+	conn                 net.Conn
+	buffer               []byte
+	lastSeen             time.Time
+	mu                   sync.Mutex
+	tlsHandshakePending  bool
+	tlsHandshakeExpected int
+	tlsHandshakeBuffer   []byte
+	firstTLSWritten      bool
+	noDelayWasSet        bool
+}
+
+func (s *session) handleUpstreamData(data []byte, qf *QueryFields) {
+	if s.firstTLSWritten {
+		s.writeDirect(data, qf)
+		return
+	}
+
+	if !s.tlsHandshakePending {
+		if len(data) > 0 && data[0] == 0x16 {
+			s.tlsHandshakePending = true
+			s.tlsHandshakeBuffer = append([]byte(nil), data...)
+			if len(s.tlsHandshakeBuffer) >= 5 {
+				s.tlsHandshakeExpected = 5 + int(binary.BigEndian.Uint16(s.tlsHandshakeBuffer[3:5]))
+			} else {
+				s.tlsHandshakeExpected = -1
+			}
+			s.logHandshakeProgress(qf)
+			s.flushHandshakeIfReady(qf)
+			return
+		}
+		s.writeDirect(data, qf)
+		return
+	}
+
+	s.tlsHandshakeBuffer = append(s.tlsHandshakeBuffer, data...)
+	if s.tlsHandshakeExpected < 0 && len(s.tlsHandshakeBuffer) >= 5 {
+		s.tlsHandshakeExpected = 5 + int(binary.BigEndian.Uint16(s.tlsHandshakeBuffer[3:5]))
+	}
+	s.logHandshakeProgress(qf)
+	s.flushHandshakeIfReady(qf)
+}
+
+func (s *session) logHandshakeProgress(qf *QueryFields) {
+	if !s.tlsHandshakePending {
+		return
+	}
+	total := s.tlsHandshakeExpected
+	if total <= 0 {
+		total = len(s.tlsHandshakeBuffer)
+	}
+	log.Printf("Handshake buffering: collected %d/%d bytes for session=%s", len(s.tlsHandshakeBuffer), total, qf.SessionID)
+}
+
+func (s *session) flushHandshakeIfReady(qf *QueryFields) {
+	if !s.tlsHandshakePending || s.tlsHandshakeExpected <= 0 || len(s.tlsHandshakeBuffer) < s.tlsHandshakeExpected {
+		return
+	}
+
+	handshake := s.tlsHandshakeBuffer[:s.tlsHandshakeExpected]
+	leftover := append([]byte(nil), s.tlsHandshakeBuffer[s.tlsHandshakeExpected:]...)
+	s.tlsHandshakeBuffer = nil
+	s.tlsHandshakePending = false
+	s.tlsHandshakeExpected = 0
+
+	s.setNoDelay(false)
+	n, err := s.conn.Write(handshake)
+	if err != nil {
+		log.Printf("WhatsApp handshake write error session=%s: %v", qf.SessionID, err)
+	} else {
+		log.Printf("Forwarded TLS handshake (%d bytes) session=%s seq=%s", n, qf.SessionID, qf.Seq)
+		log.Printf("Handshake flushed: wrote %d bytes in one write", n)
+	}
+	s.setNoDelay(true)
+
+	s.firstTLSWritten = true
+	if len(leftover) > 0 {
+		s.writeDirect(leftover, qf)
+	}
+}
+
+func (s *session) writeDirect(data []byte, qf *QueryFields) {
+	n, err := s.conn.Write(data)
+	if err != nil {
+		log.Printf("WhatsApp write error session=%s: %v", qf.SessionID, err)
+	} else {
+		log.Printf("Forwarded %d bytes to WhatsApp session=%s seq=%s", n, qf.SessionID, qf.Seq)
+	}
+}
+
+func (s *session) setNoDelay(enabled bool) {
+	type noDelayConn interface {
+		SetNoDelay(bool) error
+	}
+	if tcp, ok := s.conn.(noDelayConn); ok {
+		if err := tcp.SetNoDelay(enabled); err != nil {
+			log.Printf("SetNoDelay(%t) failed: %v", enabled, err)
+		} else if enabled {
+			s.noDelayWasSet = true
+		}
+	}
 }
 
 type Server struct {
@@ -153,12 +251,7 @@ func (s *Server) handleDNS(w dns.ResponseWriter, r *dns.Msg) {
 		if err != nil {
 			log.Printf("Decode error session=%s seq=%s: %v", qf.SessionID, qf.Seq, err)
 		} else if len(data) > 0 {
-			n, err := sess.conn.Write(data)
-			if err != nil {
-				log.Printf("WhatsApp write error session=%s: %v", qf.SessionID, err)
-			} else {
-				log.Printf("Forwarded %d bytes to WhatsApp session=%s seq=%s", n, qf.SessionID, qf.Seq)
-			}
+			sess.handleUpstreamData(data, qf)
 		}
 	}
 
@@ -173,8 +266,8 @@ func (s *Server) handleDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 	sess.conn.SetReadDeadline(time.Time{})
 
-	// Pack data into IPv6 responses
-	for len(sess.buffer) >= MaxIPv6Payload {
+	// Pack data into IPv6 responses (limit number per reply)
+	for len(sess.buffer) >= MaxIPv6Payload && len(m.Answer) < MaxAAAAPerResponse {
 		chunk := sess.buffer[:MaxIPv6Payload]
 		sess.buffer = sess.buffer[MaxIPv6Payload:]
 		ip, _ := PackDataToIPv6(chunk)
@@ -184,7 +277,7 @@ func (s *Server) handleDNS(w dns.ResponseWriter, r *dns.Msg) {
 		}
 		m.Answer = append(m.Answer, rr)
 	}
-	if len(sess.buffer) > 0 && len(m.Answer) == 0 {
+	if len(sess.buffer) > 0 && len(m.Answer) == 0 && len(m.Answer) < MaxAAAAPerResponse {
 		chunk := sess.buffer
 		sess.buffer = nil
 		for len(chunk) < MaxIPv6Payload {
