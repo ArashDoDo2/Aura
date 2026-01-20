@@ -57,16 +57,65 @@ dependencies {
 ```kotlin
 import internal.Internal
 
-// Start client
+// Option 1: Use system DNS (recommended for mobile)
+// Let the device use its configured DNS resolver
 try {
-    Internal.startAuraClient("8.8.8.8:53", "aura.net.")
-    Log.d("Aura", "Client started")
+    Internal.startAuraClient(
+        "",                    // Empty = system resolver
+        "tunnel.example.com.", // Your domain
+        1080                   // SOCKS5 port
+    )
+    Log.d("Aura", "Client started with system DNS")
+} catch (e: Exception) {
+    Log.e("Aura", "Failed to start: ${e.message}")
+}
+
+// Option 2: Use specific DNS server
+try {
+    Internal.startAuraClient(
+        "1.1.1.1:53",         // Custom DNS
+        "tunnel.example.com.", // Your domain
+        1080                   // SOCKS5 port
+    )
+    Log.d("Aura", "Client started with custom DNS")
 } catch (e: Exception) {
     Log.e("Aura", "Failed to start: ${e.message}")
 }
 
 // Stop client
 Internal.stopAuraClient()
+```
+
+### Android UI Example
+
+For a user-friendly GUI, make DNS server field optional:
+
+```kotlin
+// UI Code
+val dnsInput = findViewById<EditText>(R.id.dnsServerInput)
+val domainInput = findViewById<EditText>(R.id.domainInput)
+val portInput = findViewById<EditText>(R.id.portInput)
+
+findViewById<Button>(R.id.startButton).setOnClickListener {
+    val dns = dnsInput.text.toString().trim()  // User can leave empty
+    val domain = domainInput.text.toString()
+    val port = portInput.text.toString().toIntOrNull() ?: 1080
+    
+    try {
+        Internal.startAuraClient(dns, domain, port)
+        Toast.makeText(this, 
+            if (dns.isEmpty()) "Using system DNS" else "Using $dns",
+            Toast.LENGTH_SHORT
+        ).show()
+    } catch (e: Exception) {
+        Toast.makeText(this, "Error: ${e.message}", Toast.LENGTH_LONG).show()
+    }
+}
+
+findViewById<Button>(R.id.stopButton).setOnClickListener {
+    Internal.stopAuraClient()
+    Toast.makeText(this, "Stopped", Toast.LENGTH_SHORT).show()
+}
 ```
 
 ## Graceful Shutdown
@@ -82,7 +131,9 @@ adb logcat | grep Aura
 
 ## Notes
 
-- The client listens on port 1080 (SOCKS5)
+- The client listens on port 1080 (SOCKS5) by default
+- DNS server is now **optional** - leave empty to use device's DNS
 - Ensure your Android app has INTERNET permission in `AndroidManifest.xml`
 - For VPN-based routing, implement VpnService in your Android app
-- The `.aar` exports `StartAuraClient(dnsServer, domain)` and `StopAuraClient()`
+- The `.aar` exports `StartAuraClient(dnsServer, domain, port)` and `StopAuraClient()`
+- System DNS is perfect for mobile networks where DNS changes dynamically
