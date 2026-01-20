@@ -12,16 +12,17 @@ import (
 )
 
 func main() {
-	dnsServer := flag.String("dns", "8.8.8.8:53", "DNS server address")
-	domain := flag.String("domain", "aura.net.", "Domain root for Aura")
+	dnsServer := flag.String("dns", getEnv("AURA_DNS_SERVER", "8.8.8.8:53"), "DNS server address")
+	domain := flag.String("domain", getEnv("AURA_DOMAIN", "aura.net."), "Target domain")
+	port := flag.Int("port", getEnvInt("AURA_SOCKS5_PORT", 1080), "SOCKS5 proxy port")
 	flag.Parse()
 
-	err := internal.StartAuraClient(*dnsServer, *domain)
+	err := internal.StartAuraClient(*dnsServer, *domain, *port)
 	if err != nil {
 		fmt.Println("Failed to start Aura client:", err)
 		os.Exit(1)
 	}
-	fmt.Println("Aura client started on port 1080. Press Ctrl+C to stop.")
+	fmt.Printf("Aura client started on port %d. Press Ctrl+C to stop.\n", *port)
 
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
@@ -30,4 +31,21 @@ func main() {
 	internal.StopAuraClient()
 	time.Sleep(1 * time.Second)
 	fmt.Println("Stopped.")
+}
+
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+func getEnvInt(key string, defaultValue int) int {
+	if value := os.Getenv(key); value != "" {
+		var intVal int
+		if _, err := fmt.Sscanf(value, "%d", &intVal); err == nil {
+			return intVal
+		}
+	}
+	return defaultValue
 }

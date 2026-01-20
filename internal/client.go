@@ -17,28 +17,34 @@ import (
 )
 
 const (
-Socks5Port      = 1080
-MaxChunkSize    = 30  // Fragment TCP data into 30-byte chunks
-MaxDataLabelLen = 63  // DNS label max length
-DomainSuffix    = "aura.net."
-PollInterval    = 500 * time.Millisecond // Sequential polling interval
+DefaultSocks5Port = 1080
+MaxChunkSize      = 30  // Fragment TCP data into 30-byte chunks
+MaxDataLabelLen   = 63  // DNS label max length
+PollInterval      = 500 * time.Millisecond // Sequential polling interval
 )
 
 // b32Encoder: Base32 with no padding, lowercase for DNS compatibility
 var b32Encoder = base32.StdEncoding.WithPadding(base32.NoPadding)
 
 type AuraClient struct {
-DNSServer string // Public DNS like "1.1.1.1:53"
-SessionID string
-Mutex     sync.Mutex
-Seq       uint16
+DNSServer  string // Public DNS like "1.1.1.1:53"
+Domain     string // Target domain (e.g., "example.com.")
+Socks5Port int    // SOCKS5 proxy listen port
+SessionID  string
+Mutex      sync.Mutex
+Seq        uint16
 }
 
-func NewAuraClient(dnsServer string) *AuraClient {
+func NewAuraClient(dnsServer, domain string, port int) *AuraClient {
 rand.Seed(time.Now().UnixNano())
+if port == 0 {
+port = DefaultSocks5Port
+}
 return &AuraClient{
-DNSServer: dnsServer,
-SessionID: randomHex(4), // 4-char hex session ID
+DNSServer:  dnsServer,
+Domain:     domain,
+Socks5Port: port,
+SessionID:  randomHex(4), // 4-char hex session ID
 }
 }
 
@@ -49,15 +55,15 @@ return hex.EncodeToString(b)
 }
 
 // StartSocks5 starts the SOCKS5 proxy and returns when context is cancelled
-func (c *AuraClient) StartSocks5(ctx context.Context, domain string) error {
-ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", Socks5Port))
+func (c *AuraClient) StartSocks5(ctx context.Context) error {
+ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", c.Socks5Port))
 if err != nil {
 return err
 }
 defer ln.Close()
 
-log.Printf("Aura-Client SOCKS5 listening on 127.0.0.1:%d", Socks5Port)
-log.Printf("DNS Server: %s, Session: %s", c.DNSServer, c.SessionID)
+log.Printf("Aura Client SOCKS5 listening on 127.0.0.1:%d", c.Socks5Port)
+log.Printf("DNS Server: %s, Domain: %s, Session: %s", c.DNSServer, c.Domain, c.SessionID)
 
 for {
 conn, err := ln.Accept()
@@ -165,8 +171,8 @@ c.Mutex.Unlock()
 nonce := randomHex(4)
 label := strings.ToLower(b32Encoder.EncodeToString(data))
 
-// Packet Structure: [Nonce]-[Seq]-[SessionID].[Base32Data].aura.net.
-qname := fmt.Sprintf("%s-%04x-%s.%s.%s", nonce, seq, c.SessionID, label, DomainSuffix)
+// Packet Structure: [Nonce]-[Seq]-[SessionID].[Base32Data].<domain>
+qname := fmt.Sprintf("%s-%04x-%s.%s.%s", nonce, seq, c.SessionID, label, c.Domain)
 
 m := new(dns.Msg)
 m.SetQuestion(qname, dns.TypeAAAA)
@@ -204,7 +210,7 @@ conn.Write(resp)
 func (c *AuraClient) pollDNS() []byte {
 // Use special sequence ffff for polling
 nonce := randomHex(4)
-qname := fmt.Sprintf("%s-ffff-%s..%s", nonce, c.SessionID, DomainSuffix)
+qname := fmt.Sprintf("%s-ffff-%s..%s", nonce, c.SessionID, c.Domain)
 
 m := new(dns.Msg)
 m.SetQuestion(qname, dns.TypeAAAA)

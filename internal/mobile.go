@@ -1,42 +1,40 @@
 package internal
 
 import (
-	"context"
-	"errors"
-	"sync"
+"context"
 )
 
 var (
-	runningCtx    context.Context
-	runningCancel context.CancelFunc
-	runningMutex  sync.Mutex
+globalClient *AuraClient
+globalCancel context.CancelFunc
 )
 
-// StartAuraClient starts the Aura SOCKS5 proxy for mobile/Android use.
-// Returns error if startup fails. Call StopAuraClient() to stop gracefully.
-func StartAuraClient(dnsServer string, domain string) error {
-	runningMutex.Lock()
-	if runningCtx != nil {
-		runningMutex.Unlock()
-		return errors.New("Aura client already running")
-	}
-	runningCtx, runningCancel = context.WithCancel(context.Background())
-	runningMutex.Unlock()
-
-	client := NewAuraClient(dnsServer)
-	go func() {
-		_ = client.StartSocks5(runningCtx, domain)
-	}()
-	return nil
+// StartAuraClient starts the Aura SOCKS5 proxy
+// dnsServer example: "1.1.1.1:53"
+// domain example: "example.com."
+// port: SOCKS5 listen port (0 for default 1080)
+func StartAuraClient(dnsServer, domain string, port int) error {
+if globalClient != nil {
+StopAuraClient()
 }
 
-// StopAuraClient stops the running Aura client gracefully.
+ctx, cancel := context.WithCancel(context.Background())
+globalCancel = cancel
+
+globalClient = NewAuraClient(dnsServer, domain, port)
+go func() {
+err := globalClient.StartSocks5(ctx)
+if err != nil {
+// Log error
+}
+}()
+return nil
+}
+
+// StopAuraClient gracefully stops the proxy
 func StopAuraClient() {
-	runningMutex.Lock()
-	if runningCancel != nil {
-		runningCancel()
-		runningCancel = nil
-		runningCtx = nil
-	}
-	runningMutex.Unlock()
+if globalCancel != nil {
+globalCancel()
+}
+globalClient = nil
 }

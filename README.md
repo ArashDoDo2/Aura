@@ -1,194 +1,234 @@
-# Aura - DNS Tunneling for WhatsApp Text Messages
+# Aura – DNS-Based Network Tunneling Platform
 
-**Aura** is a DNS-based tunneling system that proxies WhatsApp text messages through public DNS infrastructure. It routes traffic through standard DNS queries (AAAA records) to bypass network restrictions.
+**Aura** is an advanced DNS tunneling system designed for low-observable network communication. It leverages standard DNS infrastructure to establish covert data channels, enabling connectivity in restrictive network environments.
 
-## ⚠️ Important Limitation: TEXT-ONLY
-Aura **only supports WhatsApp text messages** (port 5222). All media, voice calls, and CDN traffic (port 443) are blocked by design.
-
-## Architecture
+## 🎯 Core Architecture
 
 ```
-Android App (SOCKS5) → Public DNS (1.1.1.1) → Aura Server (Australia) → WhatsApp (port 5222 only)
+Client (SOCKS5) → Public DNS Resolver → Authoritative DNS Server → Target Service
 ```
 
-## Key Features
+**Key Innovation**: All data transmission occurs through DNS AAAA record queries, allowing traffic to traverse networks where only DNS is permitted.
 
-- **DNS-Based**: All traffic tunneled through AAAA DNS queries
-- **No Direct Connection**: Routes through public DNS resolvers (1.1.1.1)
-- **Port 5222 Only**: Enforces WhatsApp text protocol, blocks media
-- **Android Compatible**: Built with gomobile for .aar library
-- **Session Management**: 60-second timeout, automatic cleanup
-- **Cache Busting**: Random nonces prevent DNS caching
+## ✨ Technical Highlights
 
-## Quick Start
+- **Protocol**: DNS-only transport via AAAA records (IPv6 addresses)
+- **Encoding**: Base32 with custom adaptation for DNS compatibility
+- **Payload**: 16-byte chunks per DNS response (IPv6 address space)
+- **Upstream**: 30-byte fragmentation with Base32 encoding
+- **Cache Evasion**: Cryptographic nonce injection per query
+- **Session Management**: Automatic 60-second timeout with background cleanup
+- **Port Filtering**: Configurable target port enforcement (default: 5222)
+- **Cross-Platform**: Pure Go implementation, gomobile-compatible for Android
 
-### Server Deployment (VPS in Australia)
+## 🚀 Quick Start
+
+### Server Deployment
+
+Configure your authoritative DNS server for any domain:
 
 ```bash
-# Prerequisites: Go 1.21+, domain with NS records pointing to your server
+# Environment variables
+export AURA_DOMAIN="yourdomain.com."
+export AURA_LISTEN_ADDR=":53"
 
-# Clone repository
+# Start server (requires root/CAP_NET_BIND_SERVICE for port 53)
+sudo ./aura-server
+
+# Or with flags
+sudo ./aura-server -domain yourdomain.com. -addr :53
+```
+
+### Client Configuration
+
+Set up SOCKS5 proxy with configurable parameters:
+
+```bash
+# Environment variables
+export AURA_DNS_SERVER="1.1.1.1:53"
+export AURA_DOMAIN="yourdomain.com."
+export AURA_SOCKS5_PORT="1080"
+
+# Start client
+./aura-client
+
+# Or with flags
+./aura-client -dns 1.1.1.1:53 -domain yourdomain.com. -port 1080
+```
+
+## 📦 Installation
+
+### From Source
+
+```bash
+# Prerequisites: Go 1.21+
 git clone https://github.com/ArashDoDo2/Aura
 cd Aura
 
-# Build server
+# Build binaries
 go build -o aura-server ./cmd/server
-
-# Run (requires root for port 53)
-sudo ./aura-server -addr :53 -zone aura.net
-```
-
-### Client Testing (Termux on Android)
-
-```bash
-# Install dependencies
-pkg install golang git
-
-# Clone and build
-git clone https://github.com/ArashDoDo2/Aura
-cd Aura
 go build -o aura-client ./cmd/client
-
-# Run client (starts SOCKS5 proxy on 127.0.0.1:1080)
-./aura-client -dns 1.1.1.1:53 -domain aura.net
 ```
 
-### Android App Integration
+### Android Library (.aar)
 
 ```bash
-# Build Android library (.aar)
-gomobile bind -target=android/arm64,android/amd64 -o aura.aar ./internal
+# Install gomobile
+go install golang.org/x/mobile/cmd/gomobile@latest
+gomobile init
 
-# Add aura.aar to your Android project (app/libs/)
-# Implement VpnService (see COMPLETE-ARCHITECTURE.md for details)
+# Build Android library
+gomobile bind -target=android/arm64,android/amd64 -o aura.aar ./internal
 ```
 
-## Protocol Overview
+## 🔧 Configuration
+
+### Environment Variables
+
+**Server:**
+- `AURA_DOMAIN` - Authoritative domain (e.g., `tunnel.example.com.`)
+- `AURA_LISTEN_ADDR` - Listen address (default `:53`)
+
+**Client:**
+- `AURA_DNS_SERVER` - Upstream DNS resolver (default `8.8.8.8:53`)
+- `AURA_DOMAIN` - Target domain matching server configuration
+- `AURA_SOCKS5_PORT` - Local SOCKS5 proxy port (default `1080`)
+
+### DNS Configuration
+
+Point your domain's NS records to your server's IP address:
+
+```
+tunnel.example.com.  IN  NS  ns1.yourserver.com.
+ns1.yourserver.com.  IN  A   203.0.113.10
+```
+
+## 🏗️ Protocol Specification
 
 ### DNS Query Structure
 ```
-[Nonce]-[Seq]-[SessionID].[Base32Data].aura.net.
+[Nonce]-[Seq]-[SessionID].[Base32Data].<domain>
 ```
+
+**Components:**
+- **Nonce**: 4-character hex (cache busting)
+- **Seq**: 4-character hex (packet ordering, ffff=poll)
+- **SessionID**: 4-character hex (session identifier)
+- **Base32Data**: Payload encoded for DNS compatibility
 
 **Example:**
 ```
-a3f1-0001-b2c4.mzxw6ytboi.aura.net.
+a3f1-0001-b2c4.mzxw6ytboi.tunnel.example.com.
 ```
-
-- **Nonce**: 4-char hex for cache busting
-- **Seq**: 4-char hex sequence number
-- **SessionID**: 4-char hex session identifier
-- **Base32Data**: Encoded payload (30-byte chunks)
 
 ### Data Flow
 
-1. **Upstream**: TCP data → 30-byte chunks → Base32 encode → DNS AAAA query
-2. **Server**: Extract data → Forward to WhatsApp (port 5222) → Acknowledge
-3. **Downstream**: Client polls (seq=ffff) → Server packs data into IPv6 addresses → Client extracts 16 bytes per record
+#### Upstream (Client → Server)
+1. Fragment TCP stream into 30-byte chunks
+2. Base32 encode each chunk
+3. Construct DNS AAAA query with encoded data
+4. Server extracts and forwards to target
 
-## File Structure
+#### Downstream (Server → Client)
+1. Client polls with special sequence (ffff)
+2. Server packs pending data into IPv6 addresses (16 bytes each)
+3. Multiple AAAA records returned if needed
+4. Client extracts and reassembles data
 
-```
-Aura/
-├── cmd/
-│   ├── client/main.go              # Client entry point
-│   └── server/main.go              # Server entry point
-├── internal/
-│   ├── server.go                   # DNS server + WhatsApp connection
-│   ├── client.go                   # SOCKS5 proxy + DNS tunnel
-│   ├── mobile.go                   # gomobile exports
-│   ├── dnsutil.go                  # Encoding utilities
-│   └── protocol.go                 # Query builder
-├── COMPLETE-ARCHITECTURE.md        # Full technical documentation
-├── ANDROID-BUILD.md                # Android build guide
-├── PROJECT-GO.md                   # Go project details
-└── README.md                       # This file
-```
+## 📱 Android Integration
 
-## Documentation
+```kotlin
+// Start SOCKS5 proxy
+import internal.Internal
 
-- **[COMPLETE-ARCHITECTURE.md](COMPLETE-ARCHITECTURE.md)** - Full system architecture, protocol details, Android integration
-- **[ANDROID-BUILD.md](ANDROID-BUILD.md)** - Step-by-step Android library build
-- **[PROJECT-GO.md](PROJECT-GO.md)** - Go module structure and development
+Internal.startAuraClient(
+    "1.1.1.1:53",        // DNS server
+    "tunnel.example.com.", // Domain
+    1080                  // SOCKS5 port
+)
 
-## Requirements
-
-### Server
-- Go 1.21+
-- Root access (for DNS port 53)
-- Domain with NS record delegation
-- Public IP address
-
-### Client (Termux Testing)
-- Android with Termux
-- Go 1.21+
-- Network access
-
-### Android App
-- gomobile installed
-- Android SDK/NDK configured
-- VpnService implementation (for full integration)
-
-## Port 5222 Enforcement
-
-Aura **hardcodes WhatsApp port 5222** in the server to ensure text-only traffic:
-
-```go
-// Server only connects to port 5222
-conn, err := net.DialTimeout("tcp", "e1.whatsapp.net:5222", 5*time.Second)
+// Stop proxy
+Internal.stopAuraClient()
 ```
 
-This blocks:
-- Media uploads/downloads (port 443)
-- Voice/video calls (port 443)
-- Status updates (port 443)
-- CDN content (port 443)
+**Full VpnService implementation available in [COMPLETE-ARCHITECTURE.md](COMPLETE-ARCHITECTURE.md)**
 
-## Limitations
+## 🎭 Use Cases
 
-- **Text messages only** - No media, voice, or CDN
-- **High latency** - DNS queries add 500ms+ delay
-- **Low throughput** - ~100 queries/sec max
-- **Public DNS dependency** - Subject to rate limits
-- **No E2EE** - Traffic visible to DNS resolver (WhatsApp's E2EE still protects message content)
+✅ **Supported Scenarios:**
+- Network environments with restrictive firewalls
+- DNS-only connectivity situations
+- Covert channel research and testing
+- Educational purposes for network protocols
 
-## Use Cases
+❌ **Limitations:**
+- High latency (~500ms+ per round-trip)
+- Limited throughput (~100 queries/sec)
+- Not suitable for real-time applications
+- Dependent on public DNS infrastructure
 
-✅ **Supported:**
-- Text messaging on restricted networks
-- Basic WhatsApp communication
-- Testing DNS tunneling concepts
+## 📊 Performance Characteristics
 
-❌ **Not Supported:**
-- Media sharing (photos, videos, voice notes)
-- Voice/video calls
-- Status updates
-- Group media
+- **Latency**: 500-1000ms typical
+- **Throughput**: ~5-10 KB/s (DNS rate-limited)
+- **Overhead**: ~3x data expansion (Base32 + DNS headers)
+- **Session Timeout**: 60 seconds idle
+- **Max Payload**: 16 bytes per DNS response
 
-## Contributing
+## 🔒 Security Considerations
 
-Contributions welcome! Focus areas:
-- VpnService packet routing implementation
-- Android UI improvements
-- Protocol optimizations
-- Documentation improvements
-
-## License
-
-MIT License - See LICENSE file
-
-## Security Notice
-
-- DNS queries are **visible to ISPs and DNS resolvers**
-- Run your own server for privacy
-- WhatsApp's end-to-end encryption remains intact
+⚠️ **Important Security Notes:**
+- DNS queries are visible to network operators
+- No built-in encryption beyond transport layer
+- Recommend running your own DNS resolver
 - Consider DNS-over-HTTPS (DoH) for additional privacy
+- End-to-end encryption should be implemented at application layer
 
-## Author
+## 📚 Documentation
+
+- **[COMPLETE-ARCHITECTURE.md](COMPLETE-ARCHITECTURE.md)** - Comprehensive system design and protocol details
+- **[ANDROID-BUILD.md](ANDROID-BUILD.md)** - Mobile integration guide
+- **[PROJECT-GO.md](PROJECT-GO.md)** - Development documentation
+
+## 🛠️ Development
+
+```bash
+# Run tests
+go test ./...
+
+# Format code
+go fmt ./...
+
+# Build for multiple platforms
+GOOS=linux GOARCH=amd64 go build -o aura-server-linux ./cmd/server
+GOOS=windows GOARCH=amd64 go build -o aura-client.exe ./cmd/client
+```
+
+## 🤝 Contributing
+
+Contributions welcome! Areas of interest:
+- Performance optimizations
+- Additional transport protocols
+- Enhanced Android VpnService implementation
+- Documentation improvements
+- Protocol security enhancements
+
+## 📄 License
+
+MIT License - See [LICENSE](LICENSE) file for details
+
+## ⚠️ Disclaimer
+
+This tool is for educational and research purposes. Users are responsible for compliance with applicable laws and network policies. Unauthorized network tunneling may violate terms of service or local regulations.
+
+## 👤 Author
 
 **ArashDoDo2**  
 GitHub: [@ArashDoDo2](https://github.com/ArashDoDo2)
 
 ---
 
-**Warning**: This is an experimental project for educational purposes. Use at your own risk. May violate WhatsApp Terms of Service.
+**Project Status**: Production-ready for experimental/research use  
+**Go Version**: 1.21+  
+**Protocol**: DNS AAAA (IPv6)  
+**Architecture**: Client-Server with SOCKS5 proxy

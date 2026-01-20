@@ -1,7 +1,6 @@
 package internal
 
 import (
-"encoding/hex"
 "fmt"
 "log"
 "net"
@@ -12,8 +11,8 @@ import (
 "github.com/miekg/dns"
 )
 
-// Packet Structure: [Nonce(4hex)]-[Seq(4hex)]-[SessionID(4hex)].[Base32Data].aura.net.
-// Example: a1b2-0001-cafe.mfzwizj.aura.net.
+// Packet Structure: [Nonce(4hex)]-[Seq(4hex)]-[SessionID(4hex)].[Base32Data].<domain>
+// Example: a1b2-0001-cafe.mfzwizj.example.com.
 // - Nonce: 4-char hex for cache busting (prevents DNS caching)
 // - Seq: 4-char hex sequence number (0000-FFFF)
 // - SessionID: 4-char hex session identifier
@@ -44,7 +43,6 @@ DataLabel: parts[1],
 }
 
 const (
-ZoneName       = "aura.net."
 WhatsAppHost   = "e1.whatsapp.net"
 WhatsAppPort   = 5222 // ONLY port 5222 - filters media/CDN traffic automatically
 SessionTimeout = 60 * time.Second
@@ -52,162 +50,162 @@ MaxIPv6Payload = 16
 )
 
 type session struct {
-id        string
-tcpConn   net.Conn
-tcpMutex  sync.Mutex
-lastSeen  time.Time
-inBuffer  []byte
-outBuffer map[uint16][]byte
-seqSeen   map[uint16]bool
+conn     net.Conn
+buffer   []byte
+lastSeen time.Time
+mu       sync.Mutex
 }
 
 type Server struct {
+mu       sync.Mutex
 sessions map[string]*session
-mu       sync.RWMutex
-zone     string
+Domain   string // Configurable domain (e.g., "example.com.")
 }
 
-func NewServer(zone string) *Server {
-return &Server{
+func NewServer(domain string) *Server {
+s := &Server{
 sessions: make(map[string]*session),
-zone:     zone,
+Domain:   domain,
 }
+go s.sessionTimeoutWatcher()
+return s
 }
 
 func (s *Server) ListenAndServe(addr string) error {
-dns.HandleFunc(s.zone, s.handleDNS)
+dns.HandleFunc(s.Domain, s.handleDNS)
 srv := &dns.Server{Addr: addr, Net: "udp"}
-log.Printf("Aura-Server listening on %s for zone %s (WhatsApp port %d only)", addr, s.zone, WhatsAppPort)
+log.Printf("Aura Server listening on %s for domain %s (WhatsApp port %d only)", addr, s.Domain, WhatsAppPort)
 return srv.ListenAndServe()
 }
 
 func (s *Server) handleDNS(w dns.ResponseWriter, r *dns.Msg) {
-if len(r.Question) == 0 {
-return
-}
-q := r.Question[0]
-if q.Qtype != dns.TypeAAAA || !strings.HasSuffix(q.Name, s.zone) {
-return
-}
-fields, err := ParseQueryName(q.Name)
-if err != nil {
-return
-}
-seq, _ := hex.DecodeString(fields.Seq)
-if len(seq) != 2 {
-return
-}
-seqNum := uint16(seq[0])<<8 | uint16(seq[1])
+m := new(dns.Msg)
+m.SetReply(r)
+m.Authoritative = true
 
-sess := s.getSession(fields.SessionID)
+if len(r.Question) == 0 {
+w.WriteMsg(m)
+return
+}
+
+q := r.Question[0]
+if q.Qtype != dns.TypeAAAA {
+m.SetRcode(r, dns.RcodeNotImplemented)
+w.WriteMsg(m)
+return
+}
+
+// Verify query is for our domain
+if !strings.HasSuffix(q.Name, s.Domain) {
+m.SetRcode(r, dns.RcodeNameError)
+w.WriteMsg(m)
+return
+}
+
+qf, err := ParseQueryName(q.Name)
+if err != nil {
+m.SetRcode(r, dns.RcodeFormatError)
+w.WriteMsg(m)
+return
+}
+
+sess, err := s.getSession(qf.SessionID, q.Name)
+if err != nil {
+log.Printf("Session error: %v", err)
+m.SetRcode(r, dns.RcodeServerFailure)
+w.WriteMsg(m)
+return
+}
+
+sess.mu.Lock()
 sess.lastSeen = time.Now()
 
-// Handle upstream data (client -> WhatsApp)
-if fields.DataLabel != "" {
-data, err := DecodeLabelToData(fields.DataLabel)
-if err == nil && !sess.seqSeen[seqNum] {
-sess.outBuffer[seqNum] = data
-sess.seqSeen[seqNum] = true
-go s.forwardToWhatsApp(sess, seqNum)
+// Handle upstream data if present
+if len(qf.DataLabel) > 0 {
+data, err := DecodeLabelToData(qf.DataLabel)
+if err == nil && len(data) > 0 {
+sess.conn.Write(data)
 }
 }
 
-// Prepare AAAA response with downstream data (WhatsApp -> client)
-resp := new(dns.Msg)
-resp.SetReply(r)
-var payload []byte
-sess.tcpMutex.Lock()
-if len(sess.inBuffer) > 0 {
-if len(sess.inBuffer) > MaxIPv6Payload {
-payload = sess.inBuffer[:MaxIPv6Payload]
-sess.inBuffer = sess.inBuffer[MaxIPv6Payload:]
-} else {
-payload = sess.inBuffer
-sess.inBuffer = nil
+// Read downstream data (non-blocking)
+buf := make([]byte, MaxIPv6Payload*10)
+sess.conn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
+n, _ := sess.conn.Read(buf)
+if n > 0 {
+sess.buffer = append(sess.buffer, buf[:n]...)
 }
-}
-sess.tcpMutex.Unlock()
-if len(payload) > 0 {
-ip, _ := PackDataToIPv6(payload)
-resp.Answer = append(resp.Answer, &dns.AAAA{
+sess.conn.SetReadDeadline(time.Time{})
+
+// Pack data into IPv6 responses
+for len(sess.buffer) >= MaxIPv6Payload {
+chunk := sess.buffer[:MaxIPv6Payload]
+sess.buffer = sess.buffer[MaxIPv6Payload:]
+ip, _ := PackDataToIPv6(chunk)
+rr := &dns.AAAA{
 Hdr:  dns.RR_Header{Name: q.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 0},
 AAAA: ip,
-})
 }
-w.WriteMsg(resp)
+m.Answer = append(m.Answer, rr)
+}
+if len(sess.buffer) > 0 && len(m.Answer) == 0 {
+chunk := sess.buffer
+sess.buffer = nil
+for len(chunk) < MaxIPv6Payload {
+chunk = append(chunk, 0)
+}
+ip, _ := PackDataToIPv6(chunk[:MaxIPv6Payload])
+rr := &dns.AAAA{
+Hdr:  dns.RR_Header{Name: q.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 0},
+AAAA: ip,
+}
+m.Answer = append(m.Answer, rr)
 }
 
-func (s *Server) getSession(sessionID string) *session {
+sess.mu.Unlock()
+w.WriteMsg(m)
+}
+
+func (s *Server) getSession(sid string, qname string) (*session, error) {
 s.mu.Lock()
-sess, ok := s.sessions[sessionID]
-if !ok {
-// TEXT-ONLY ENFORCEMENT: Only connect to WhatsApp port 5222
-// This automatically filters out media/CDN traffic
-whatsappAddr := fmt.Sprintf("%s:%d", WhatsAppHost, WhatsAppPort)
-tcpConn, err := net.DialTimeout("tcp", whatsappAddr, 5*time.Second)
+defer s.mu.Unlock()
+
+if sess, ok := s.sessions[sid]; ok {
+return sess, nil
+}
+
+// TEXT-ONLY ENFORCEMENT: Block all non-5222 connections
+// This filters out media, voice, CDN traffic
+if strings.Contains(qname, "media") || strings.Contains(qname, "cdn") {
+return nil, fmt.Errorf("media/CDN traffic blocked")
+}
+
+// ONLY connect to WhatsApp port 5222 (text messages)
+conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", WhatsAppHost, WhatsAppPort), 5*time.Second)
 if err != nil {
-log.Printf("Failed to connect to %s: %v", whatsappAddr, err)
-s.mu.Unlock()
-return &session{id: sessionID, outBuffer: make(map[uint16][]byte), seqSeen: make(map[uint16]bool)}
-}
-sess = &session{
-id:        sessionID,
-tcpConn:   tcpConn,
-lastSeen:  time.Now(),
-outBuffer: make(map[uint16][]byte),
-seqSeen:   make(map[uint16]bool),
-}
-s.sessions[sessionID] = sess
-go s.readFromWhatsApp(sess)
-go s.sessionTimeoutWatcher(sessionID)
-}
-s.mu.Unlock()
-return sess
+return nil, err
 }
 
-func (s *Server) forwardToWhatsApp(sess *session, seqNum uint16) {
-sess.tcpMutex.Lock()
-data, ok := sess.outBuffer[seqNum]
-if ok && sess.tcpConn != nil {
-sess.tcpConn.Write(data)
-delete(sess.outBuffer, seqNum)
+sess := &session{
+conn:     conn,
+lastSeen: time.Now(),
 }
-sess.tcpMutex.Unlock()
+s.sessions[sid] = sess
+log.Printf("New session: %s", sid)
+return sess, nil
 }
 
-func (s *Server) readFromWhatsApp(sess *session) {
-buf := make([]byte, 1024)
+func (s *Server) sessionTimeoutWatcher() {
 for {
-n, err := sess.tcpConn.Read(buf)
-if err != nil {
-log.Printf("WhatsApp read error: %v", err)
-return
-}
-sess.tcpMutex.Lock()
-sess.inBuffer = append(sess.inBuffer, buf[:n]...)
-sess.tcpMutex.Unlock()
-}
-}
-
-func (s *Server) sessionTimeoutWatcher(sessionID string) {
-ticker := time.NewTicker(10 * time.Second)
-defer ticker.Stop()
-for range ticker.C {
-s.mu.RLock()
-sess, ok := s.sessions[sessionID]
-s.mu.RUnlock()
-if !ok {
-return
-}
-if time.Since(sess.lastSeen) > SessionTimeout {
+time.Sleep(10 * time.Second)
 s.mu.Lock()
-if sess.tcpConn != nil {
-sess.tcpConn.Close()
+for sid, sess := range s.sessions {
+if time.Since(sess.lastSeen) > SessionTimeout {
+sess.conn.Close()
+delete(s.sessions, sid)
+log.Printf("Session timeout: %s", sid)
 }
-delete(s.sessions, sessionID)
+}
 s.mu.Unlock()
-log.Printf("Session %s timed out and cleaned up", sessionID)
-return
-}
 }
 }
