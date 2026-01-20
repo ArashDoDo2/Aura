@@ -1,7 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">AuraMobileClient</string>
-    <string name="connect">اتصال</string>
-    <string name="disconnect">قطع اتصال</string>
-    <string name="connected">وضعیت: متصل</string>
-    <string name="disconnected">وضعیت: قطع</string>
+    <string name="app_name">Aura DNS Tunnel</string>
+    <string name="connect">CONNECT</string>
+    <string name="disconnect">DISCONNECT</string>
+    <string name="connected">Connected</string>
+    <string name="disconnected">Disconnected</string>
+    <string name="dns_hint">Leave empty for system DNS</string>
+    <string name="domain_hint">e.g., tunnel.example.com.</string>
+    <string name="about_aura">About Aura</string>
 </resources>

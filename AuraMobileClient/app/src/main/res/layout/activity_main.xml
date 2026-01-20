@@ -1,48 +1,161 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:padding="24dp"
-    android:gravity="center">
+    android:padding="24dp">
+
+    <!-- Header -->
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/app_name"
+        android:textSize="28sp"
+        android:textStyle="bold"
+        android:gravity="center"
+        android:layout_marginBottom="8dp" />
 
     <TextView
-        android:id="@+id/titleText"
-        android:layout_width="wrap_content"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Aura Mobile Client"
-        android:textSize="24sp"
-        android:textStyle="bold"
+        android:text="DNS Tunnel for WhatsApp"
+        android:textSize="14sp"
+        android:gravity="center"
+        android:textColor="@android:color/darker_gray"
         android:layout_marginBottom="32dp" />
 
-    <EditText
-        android:id="@+id/dnsEdit"
+    <!-- Status Card -->
+    <androidx.cardview.widget.CardView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:hint="DNS Server (مثال: 1.2.3.4)"
-        android:inputType="text" />
+        app:cardCornerRadius="12dp"
+        app:cardElevation="4dp"
+        android:layout_marginBottom="32dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="20dp"
+            android:gravity="center">
+
+            <ImageView
+                android:id="@+id/statusIcon"
+                android:layout_width="64dp"
+                android:layout_height="64dp"
+                android:src="@android:drawable/ic_dialog_info"
+                android:scaleType="centerInside"
+                android:contentDescription="Status Icon" />
+
+            <TextView
+                android:id="@+id/statusText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Disconnected"
+                android:textSize="20sp"
+                android:textStyle="bold"
+                android:gravity="center"
+                android:layout_marginTop="12dp"
+                android:textColor="@android:color/darker_gray" />
+
+            <TextView
+                android:id="@+id/statusDetails"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Configure and connect to start tunneling"
+                android:textSize="12sp"
+                android:gravity="center"
+                android:layout_marginTop="8dp"
+                android:textColor="@android:color/darker_gray" />
+        </LinearLayout>
+
+    </androidx.cardview.widget.CardView>
+
+    <!-- DNS Input -->
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="DNS Server (Optional)"
+        android:textSize="14sp"
+        android:textStyle="bold"
+        android:layout_marginBottom="8dp" />
 
     <EditText
-        android:id="@+id/sessionEdit"
+        android:id="@+id/dnsInput"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:hint="Session ID"
+        android:layout_height="48dp"
         android:inputType="text"
-        android:layout_marginTop="12dp" />
+        android:hint="Leave empty for system DNS"
+        android:padding="12dp"
+        android:background="@android:drawable/editbox_background"
+        android:layout_marginBottom="20dp"
+        android:textSize="14sp" />
 
+    <!-- Domain Input -->
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Domain (Required) *"
+        android:textSize="14sp"
+        android:textStyle="bold"
+        android:layout_marginBottom="8dp" />
+
+    <EditText
+        android:id="@+id/domainInput"
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:inputType="text"
+        android:hint="e.g., tunnel.example.com."
+        android:padding="12dp"
+        android:background="@android:drawable/editbox_background"
+        android:layout_marginBottom="32dp"
+        android:textSize="14sp" />
+
+    <!-- Connect Button -->
     <Button
         android:id="@+id/connectBtn"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="اتصال"
-        android:layout_marginTop="24dp" />
-
-    <TextView
-        android:id="@+id/statusText"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="وضعیت: قطع"
+        android:layout_height="56dp"
+        android:text="CONNECT"
         android:textSize="16sp"
-        android:layout_marginTop="24dp" />
+        android:textStyle="bold"
+        android:textColor="@android:color/white"
+        android:background="@drawable/btn_rounded"
+        android:layout_marginBottom="24dp"
+        android:enabled="false" />
+
+    <!-- Info Card -->
+    <androidx.cardview.widget.CardView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        app:cardCornerRadius="8dp"
+        app:cardBackgroundColor="@color/info_background">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="About Aura"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                android:textColor="@color/info_text" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="• DNS-only tunneling\n• WhatsApp text messages (port 5222)\n• SOCKS5 proxy on localhost:1080\n• Leave DNS empty for auto-detect"
+                android:textSize="12sp"
+                android:textColor="@color/info_text"
+                android:layout_marginTop="8dp"
+                android:lineSpacingExtra="4dp" />
+        </LinearLayout>
+
+    </androidx.cardview.widget.CardView>
 
 </LinearLayout>
