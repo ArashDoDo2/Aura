@@ -55,8 +55,19 @@ See [internal/server.go](../internal/server.go#L12-L19) for `ParseQueryName` imp
 
 ### Mobile Bridge ([internal/mobile.go](../internal/mobile.go))
 - gomobile-compatible exports for Android
-- `StartAuraClient(dnsServer, domain, port)` - empty dnsServer = system resolver
+- `StartTunnel(dnsServer, domain)` - Main entry point (returns error string)
+- `StopTunnel()` - Graceful shutdown
+- `IsRunning()` - Status check
+- `GetStatus()` - Detailed status string
 - Global client singleton pattern
+- Legacy `StartAuraClient()` for backward compatibility
+
+### Flutter Integration ([flutter_aura/](../flutter_aura/))
+- Material Design UI with VPN controls
+- MethodChannel bridge: `com.aura.proxy/vpn`
+- Kotlin VpnService wraps Go engine
+- System DNS auto-detection in UI
+- Optional per-app VPN for WhatsApp only
 
 ## Build & Deployment
 
@@ -69,6 +80,13 @@ go build -o aura-client ./cmd/client
 **Android .aar**:
 ```bash
 gomobile bind -target=android/arm64,android/amd64 -o aura.aar ./internal
+```
+
+**Flutter app**:
+```bash
+cd flutter_aura
+flutter pub get
+flutter run  # Requires aura.aar in android/app/libs/
 ```
 
 **Configuration**: Flags OR environment variables
@@ -112,9 +130,28 @@ go run ./cmd/client -dns YOUR_SERVER_IP:53 -domain example.com.
 4. **gomobile compatibility**: Only use gomobile-compatible types in exported functions (no error return on StartAuraClient)
 5. **DNS verification**: Server checks `HasSuffix(q.Name, s.Domain)` before processing
 
+## Flutter + Go Bridge
+
+**Architecture**: Flutter (Dart) ↔ MethodChannel ↔ Kotlin ↔ JNI ↔ Go
+
+**Key files**:
+- [flutter_aura/lib/vpn_manager.dart](../flutter_aura/lib/vpn_manager.dart): MethodChannel client
+- [AuraVpnService.kt](../flutter_aura/android/app/src/main/kotlin/com/aura/flutter_aura/AuraVpnService.kt): VpnService + Go bridge
+- [MainActivity.kt](../flutter_aura/android/app/src/main/kotlin/com/aura/flutter_aura/MainActivity.kt): MethodChannel handler
+
+**MethodChannel protocol**:
+```dart
+startVpn({dnsServer: String, domain: String}) -> "" or error
+stopVpn() -> "" or error
+getStatus() -> "running" | "stopped"
+```
+
+**VPN packet forwarding**: Basic implementation in `AuraVpnService.forwardPackets()` - TODO: full SOCKS5 integration
+
 ## Documentation Structure
 
 - [COMPLETE-ARCHITECTURE.md](../COMPLETE-ARCHITECTURE.md): Deep dive into protocol and Android VPN setup
-- [ANDROID-BUILD.md](../ANDROID-BUILD.md): Build instructions and UI examples
+- [FLUTTER-BUILD.md](../FLUTTER-BUILD.md): Complete Flutter + Go build guide
+- [ANDROID-BUILD.md](../ANDROID-BUILD.md): Pure Android (no Flutter) build instructions
 - [SYSTEM-DNS-IMPLEMENTATION.md](../SYSTEM-DNS-IMPLEMENTATION.md): System resolver integration details
 - [PROJECT-GO.md](../PROJECT-GO.md): Persian documentation (راهنمای فارسی)
