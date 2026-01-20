@@ -44,6 +44,12 @@
       "languageVersion": "3.3"
     },
     {
+      "name": "ffi",
+      "rootUri": "file:///C:/Users/arash/AppData/Local/Pub/Cache/hosted/pub.dev/ffi-2.1.5",
+      "packageUri": "lib/",
+      "languageVersion": "3.7"
+    },
+    {
       "name": "flutter",
       "rootUri": "file:///C:/Users/arash/Flutter%20SDK/flutter/packages/flutter",
       "packageUri": "lib/",
