@@ -7,12 +7,7 @@ import (
 	"strings"
 )
 
-const (
-	MaxLabelLen    = 63
-	Base32Encoding = "abcdefghijklmnopqrstuvwxyz234567"
-)
-
-var b32 = base32.NewEncoding(Base32Encoding).WithPadding(base32.NoPadding)
+var b32 = base32.StdEncoding.WithPadding(base32.NoPadding)
 
 // EncodeDataToLabel encodes binary data to a Base32 DNS label (max 63 chars)
 func EncodeDataToLabel(data []byte) string {
@@ -21,7 +16,7 @@ func EncodeDataToLabel(data []byte) string {
 
 // DecodeLabelToData decodes a Base32 DNS label to binary data
 func DecodeLabelToData(label string) ([]byte, error) {
-	return b32.DecodeString(strings.ToUpper(label))
+	return b32.DecodeString(label)
 }
 
 // PackDataToIPv6 packs up to 16 bytes into an IPv6 address

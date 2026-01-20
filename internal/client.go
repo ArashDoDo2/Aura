@@ -18,9 +18,9 @@ import (
 
 const (
 	DefaultSocks5Port = 1080
-	MaxChunkSize      = 30                     // Fragment TCP data into 30-byte chunks
-	MaxDataLabelLen   = 63                     // DNS label max length
-	PollInterval      = 500 * time.Millisecond // Sequential polling interval
+	MaxChunkSize      = 30                    // Fragment TCP data into 30-byte chunks
+	MaxDataLabelLen   = 63                    // DNS label max length
+	PollInterval      = 50 * time.Millisecond // Sequential polling interval (faster downstream polling)
 )
 
 // b32Encoder: Base32 with no padding, lowercase for DNS compatibility
@@ -190,6 +190,10 @@ func (c *AuraClient) tcpToDNS(ctx context.Context, conn net.Conn) {
 		if err != nil {
 			return
 		}
+		if n == 0 {
+			continue
+		}
+		log.Printf("TCP read %d bytes from SOCKS5", n)
 		c.sendDNSPacket(buf[:n])
 	}
 }
@@ -203,12 +207,18 @@ func (c *AuraClient) sendDNSPacket(data []byte) {
 	// Cache Busting: Random nonce prevents DNS caching
 	nonce := randomHex(4)
 	label := strings.ToLower(b32Encoder.EncodeToString(data))
+	snippet := label
+	if len(snippet) > 10 {
+		snippet = snippet[:10]
+	}
+	log.Printf("Encoded chunk seq=0x%04x first10=%s len=%d", seq, snippet, len(label))
 
 	// Packet Structure: [Nonce]-[Seq]-[SessionID].[Base32Data].<domain>
 	qname := fmt.Sprintf("%s-%04x-%s.%s.%s", nonce, seq, c.SessionID, label, c.Domain)
 
 	m := new(dns.Msg)
 	m.SetQuestion(qname, dns.TypeAAAA)
+	log.Printf("DNS uplink chunk seq=0x%04x len=%d domain=%s", seq, len(data), qname)
 	c.sendQuery(m)
 }
 
@@ -249,7 +259,7 @@ func (c *AuraClient) dnsToTCP(ctx context.Context, conn net.Conn) {
 func (c *AuraClient) pollDNS() []byte {
 	// Use special sequence ffff for polling
 	nonce := randomHex(4)
-	qname := fmt.Sprintf("%s-ffff-%s..%s", nonce, c.SessionID, c.Domain)
+	qname := fmt.Sprintf("%s-ffff-%s.%s", nonce, c.SessionID, c.Domain)
 
 	m := new(dns.Msg)
 	m.SetQuestion(qname, dns.TypeAAAA)
@@ -259,9 +269,16 @@ func (c *AuraClient) pollDNS() []byte {
 		return nil
 	}
 
+	log.Printf("Polling DNS for session=%s qname=%s server=%s", c.SessionID, qname, dnsServer)
+
 	dnsClient := new(dns.Client)
 	dnsClient.Timeout = 2 * time.Second
 	resp, _, err := dnsClient.Exchange(m, dnsServer)
+
+	if err != nil {
+		log.Printf("Poll query error session=%s err=%v", c.SessionID, err)
+		return nil
+	}
 
 	if err != nil || resp == nil {
 		return nil
@@ -273,6 +290,9 @@ func (c *AuraClient) pollDNS() []byte {
 		if aaaa, ok := ans.(*dns.AAAA); ok {
 			out = append(out, aaaa.AAAA[:]...)
 		}
+	}
+	if len(out) > 0 {
+		log.Printf("DNS response poll len=%d seq=ffff domain=%s", len(out), qname)
 	}
 	return out
 }
