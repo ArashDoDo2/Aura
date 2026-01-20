@@ -12,6 +12,13 @@ import (
 "github.com/miekg/dns"
 )
 
+// Packet Structure: [Nonce(4hex)]-[Seq(4hex)]-[SessionID(4hex)].[Base32Data].aura.net.
+// Example: a1b2-0001-cafe.mfzwizj.aura.net.
+// - Nonce: 4-char hex for cache busting (prevents DNS caching)
+// - Seq: 4-char hex sequence number (0000-FFFF)
+// - SessionID: 4-char hex session identifier
+// - Base32Data: Base32-encoded payload (no padding, lowercase)
+
 type QueryFields struct {
 Nonce     string
 Seq       string
@@ -38,7 +45,8 @@ DataLabel: parts[1],
 
 const (
 ZoneName       = "aura.net."
-WhatsAppHost   = "e1.whatsapp.net:5222"
+WhatsAppHost   = "e1.whatsapp.net"
+WhatsAppPort   = 5222 // ONLY port 5222 - filters media/CDN traffic automatically
 SessionTimeout = 60 * time.Second
 MaxIPv6Payload = 16
 )
@@ -69,7 +77,7 @@ zone:     zone,
 func (s *Server) ListenAndServe(addr string) error {
 dns.HandleFunc(s.zone, s.handleDNS)
 srv := &dns.Server{Addr: addr, Net: "udp"}
-log.Printf("Aura-Server listening on %s for zone %s", addr, s.zone)
+log.Printf("Aura-Server listening on %s for zone %s (WhatsApp port %d only)", addr, s.zone, WhatsAppPort)
 return srv.ListenAndServe()
 }
 
@@ -94,6 +102,7 @@ seqNum := uint16(seq[0])<<8 | uint16(seq[1])
 sess := s.getSession(fields.SessionID)
 sess.lastSeen = time.Now()
 
+// Handle upstream data (client -> WhatsApp)
 if fields.DataLabel != "" {
 data, err := DecodeLabelToData(fields.DataLabel)
 if err == nil && !sess.seqSeen[seqNum] {
@@ -103,6 +112,7 @@ go s.forwardToWhatsApp(sess, seqNum)
 }
 }
 
+// Prepare AAAA response with downstream data (WhatsApp -> client)
 resp := new(dns.Msg)
 resp.SetReply(r)
 var payload []byte
@@ -131,9 +141,12 @@ func (s *Server) getSession(sessionID string) *session {
 s.mu.Lock()
 sess, ok := s.sessions[sessionID]
 if !ok {
-tcpConn, err := net.DialTimeout("tcp", WhatsAppHost, 5*time.Second)
+// TEXT-ONLY ENFORCEMENT: Only connect to WhatsApp port 5222
+// This automatically filters out media/CDN traffic
+whatsappAddr := fmt.Sprintf("%s:%d", WhatsAppHost, WhatsAppPort)
+tcpConn, err := net.DialTimeout("tcp", whatsappAddr, 5*time.Second)
 if err != nil {
-log.Printf("Failed to connect to WhatsApp: %v", err)
+log.Printf("Failed to connect to %s: %v", whatsappAddr, err)
 s.mu.Unlock()
 return &session{id: sessionID, outBuffer: make(map[uint16][]byte), seqSeen: make(map[uint16]bool)}
 }

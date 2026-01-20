@@ -1,214 +1,228 @@
 package internal
 
 import (
-	"context"
-	"encoding/base32"
-	"encoding/hex"
-	"fmt"
-	"io"
-	"log"
-	"math/rand"
-	"net"
-	"strings"
-	"sync"
-	"time"
+"context"
+"encoding/base32"
+"encoding/hex"
+"fmt"
+"io"
+"log"
+"math/rand"
+"net"
+"strings"
+"sync"
+"time"
 
-	"github.com/miekg/dns"
+"github.com/miekg/dns"
 )
 
 const (
-	Socks5Port      = 1080
-	WhatsAppPort    = 5222
-	MaxDataLabelLen = 63
-	DomainSuffix    = "aura.net."
+Socks5Port      = 1080
+MaxChunkSize    = 30  // Fragment TCP data into 30-byte chunks
+MaxDataLabelLen = 63  // DNS label max length
+DomainSuffix    = "aura.net."
+PollInterval    = 500 * time.Millisecond // Sequential polling interval
 )
 
-// encoding استاندارد برای ساب‌دومین (بدون حروف بزرگ و بدون Padding)
+// b32Encoder: Base32 with no padding, lowercase for DNS compatibility
 var b32Encoder = base32.StdEncoding.WithPadding(base32.NoPadding)
 
 type AuraClient struct {
-	DNSServer string // مثال: "8.8.8.8:53"
-	SessionID string
-	Mutex     sync.Mutex
-	Seq       uint16
+DNSServer string // Public DNS like "1.1.1.1:53"
+SessionID string
+Mutex     sync.Mutex
+Seq       uint16
 }
 
 func NewAuraClient(dnsServer string) *AuraClient {
-	rand.Seed(time.Now().UnixNano())
-	return &AuraClient{
-		DNSServer: dnsServer,
-		SessionID: randomHex(4),
-	}
+rand.Seed(time.Now().UnixNano())
+return &AuraClient{
+DNSServer: dnsServer,
+SessionID: randomHex(4), // 4-char hex session ID
+}
 }
 
 func randomHex(n int) string {
-	b := make([]byte, n/2)
-	rand.Read(b)
-	return hex.EncodeToString(b)
+b := make([]byte, n/2)
+rand.Read(b)
+return hex.EncodeToString(b)
 }
 
-// StartSocks5 starts the SOCKS5 proxy and returns a channel for errors and a stop function.
+// StartSocks5 starts the SOCKS5 proxy and returns when context is cancelled
 func (c *AuraClient) StartSocks5(ctx context.Context, domain string) error {
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", Socks5Port))
-	if err != nil {
-		return err
-	}
-	defer ln.Close()
+ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", Socks5Port))
+if err != nil {
+return err
+}
+defer ln.Close()
 
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-				// For mobile, just return error to caller
-				return err
-			}
-		}
-		go c.handleSocks5Conn(ctx, conn)
-	}
+log.Printf("Aura-Client SOCKS5 listening on 127.0.0.1:%d", Socks5Port)
+log.Printf("DNS Server: %s, Session: %s", c.DNSServer, c.SessionID)
+
+for {
+conn, err := ln.Accept()
+if err != nil {
+select {
+case <-ctx.Done():
+return ctx.Err()
+default:
+return err
+}
+}
+go c.handleSocks5Conn(ctx, conn)
+}
 }
 
 func (c *AuraClient) handleSocks5Conn(ctx context.Context, conn net.Conn) {
-	defer conn.Close()
+defer conn.Close()
 
-	// مرحله Handshake ساده SOCKS5
-	buf := make([]byte, 262)
-	if _, err := io.ReadFull(conn, buf[:2]); err != nil {
-		return
-	}
-
-	nMethods := int(buf[1])
-	if _, err := io.ReadFull(conn, buf[:nMethods]); err != nil {
-		return
-	}
-	conn.Write([]byte{0x05, 0x00}) // No Auth
-
-	if _, err := io.ReadFull(conn, buf[:4]); err != nil {
-		return
-	}
-	if buf[1] != 0x01 {
-		return
-	} // فقط دستور CONNECT پشتیبانی می‌شود
-
-	switch buf[3] {
-	case 0x01: // IPv4
-		if _, err := io.ReadFull(conn, buf[:4+2]); err != nil {
-			return
-		}
-	case 0x03: // Domain name
-		if _, err := io.ReadFull(conn, buf[:1]); err != nil {
-			return
-		}
-		dlen := int(buf[0])
-		if _, err := io.ReadFull(conn, buf[:dlen+2]); err != nil {
-			return
-		}
-	}
-
-	// ما فقط ترافیک واتس‌اپ را اجازه می‌دهیم
-	conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
-	c.handleWhatsApp(ctx, conn)
+// SOCKS5 Handshake
+buf := make([]byte, 262)
+if _, err := io.ReadFull(conn, buf[:2]); err != nil {
+return
 }
 
-func (c *AuraClient) handleWhatsApp(ctx context.Context, conn net.Conn) {
-	var wg sync.WaitGroup
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+nMethods := int(buf[1])
+if _, err := io.ReadFull(conn, buf[:nMethods]); err != nil {
+return
+}
+conn.Write([]byte{0x05, 0x00}) // No Auth
 
-	wg.Add(2)
-	// ارسال از موبایل به استرالیا
-	go func() {
-		defer wg.Done()
-		c.tcpToDNS(ctx, conn)
-		cancel()
-	}()
-	// دریافت از استرالیا به موبایل
-	go func() {
-		defer wg.Done()
-		c.dnsToTCP(ctx, conn)
-		cancel()
-	}()
-	wg.Wait()
+if _, err := io.ReadFull(conn, buf[:4]); err != nil {
+return
+}
+if buf[1] != 0x01 {
+return
+} // Only CONNECT supported
+
+// Read destination address
+switch buf[3] {
+case 0x01: // IPv4
+if _, err := io.ReadFull(conn, buf[:4+2]); err != nil {
+return
+}
+case 0x03: // Domain name
+if _, err := io.ReadFull(conn, buf[:1]); err != nil {
+return
+}
+dlen := int(buf[0])
+if _, err := io.ReadFull(conn, buf[:dlen+2]); err != nil {
+return
+}
 }
 
+// Send success response
+conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+c.handleTunnel(ctx, conn)
+}
+
+func (c *AuraClient) handleTunnel(ctx context.Context, conn net.Conn) {
+var wg sync.WaitGroup
+ctx, cancel := context.WithCancel(ctx)
+defer cancel()
+
+wg.Add(2)
+// Upstream: TCP -> DNS
+go func() {
+defer wg.Done()
+c.tcpToDNS(ctx, conn)
+cancel()
+}()
+// Downstream: DNS -> TCP (Sequential polling)
+go func() {
+defer wg.Done()
+c.dnsToTCP(ctx, conn)
+cancel()
+}()
+wg.Wait()
+}
+
+// tcpToDNS: Fragment TCP data into 30-byte chunks, Base32 encode, send as DNS AAAA queries
 func (c *AuraClient) tcpToDNS(ctx context.Context, conn net.Conn) {
-	buf := make([]byte, 30) // قطعات کوچک برای جا شدن در DNS Label
-	for {
-		n, err := conn.Read(buf)
-		if err != nil {
-			return
-		}
-		c.sendDNSPacket(buf[:n])
-	}
+buf := make([]byte, MaxChunkSize)
+for {
+select {
+case <-ctx.Done():
+return
+default:
+}
+
+n, err := conn.Read(buf)
+if err != nil {
+return
+}
+c.sendDNSPacket(buf[:n])
+}
 }
 
 func (c *AuraClient) sendDNSPacket(data []byte) {
-	c.Mutex.Lock()
-	seq := c.Seq
-	c.Seq++
-	c.Mutex.Unlock()
+c.Mutex.Lock()
+seq := c.Seq
+c.Seq++
+c.Mutex.Unlock()
 
-	label := strings.ToLower(b32Encoder.EncodeToString(data))
-	nonce := randomHex(4)
+// Cache Busting: Random nonce prevents DNS caching
+nonce := randomHex(4)
+label := strings.ToLower(b32Encoder.EncodeToString(data))
 
-	// ساختار: [Nonce]-[Sequence]-[SessionID].[Data].aura.net.
-	qname := fmt.Sprintf("%s-%04x-%s.%s.%s", nonce, seq, c.SessionID, label, DomainSuffix)
+// Packet Structure: [Nonce]-[Seq]-[SessionID].[Base32Data].aura.net.
+qname := fmt.Sprintf("%s-%04x-%s.%s.%s", nonce, seq, c.SessionID, label, DomainSuffix)
 
-	m := new(dns.Msg)
-	m.SetQuestion(qname, dns.TypeAAAA)
-	c.sendQuery(m)
+m := new(dns.Msg)
+m.SetQuestion(qname, dns.TypeAAAA)
+c.sendQuery(m)
 }
 
 func (c *AuraClient) sendQuery(m *dns.Msg) {
-	dnsClient := new(dns.Client)
-	dnsClient.Net = "udp"
-	dnsClient.Timeout = 2 * time.Second
-	_, _, err := dnsClient.Exchange(m, c.DNSServer)
-	if err != nil {
-		log.Printf("Upstream DNS Error: %v", err)
-	}
+dnsClient := new(dns.Client)
+dnsClient.Net = "udp"
+dnsClient.Timeout = 2 * time.Second
+_, _, err := dnsClient.Exchange(m, c.DNSServer)
+if err != nil {
+log.Printf("DNS query error: %v", err)
+}
 }
 
+// dnsToTCP: Sequential polling - Extract 16 bytes from each IPv6 address in DNS response
 func (c *AuraClient) dnsToTCP(ctx context.Context, conn net.Conn) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			resp := c.pollDNS()
-			if len(resp) > 0 {
-				conn.Write(resp)
-			} else {
-				time.Sleep(1 * time.Second) // فاصله بین Polling در زمان بیکاری
-			}
-		}
-	}
+ticker := time.NewTicker(PollInterval)
+defer ticker.Stop()
+
+for {
+select {
+case <-ctx.Done():
+return
+case <-ticker.C:
+resp := c.pollDNS()
+if len(resp) > 0 {
+conn.Write(resp)
+}
+}
+}
 }
 
 func (c *AuraClient) pollDNS() []byte {
-	nonce := randomHex(4)
-	// ارسال کوئری خالی با Seq خاص (ffff) برای دریافت دیتا
-	qname := fmt.Sprintf("%s-ffff-%s..%s", nonce, c.SessionID, DomainSuffix)
+// Use special sequence ffff for polling
+nonce := randomHex(4)
+qname := fmt.Sprintf("%s-ffff-%s..%s", nonce, c.SessionID, DomainSuffix)
 
-	m := new(dns.Msg)
-	m.SetQuestion(qname, dns.TypeAAAA)
+m := new(dns.Msg)
+m.SetQuestion(qname, dns.TypeAAAA)
 
-	dnsClient := new(dns.Client)
-	dnsClient.Timeout = 2 * time.Second
-	resp, _, err := dnsClient.Exchange(m, c.DNSServer)
+dnsClient := new(dns.Client)
+dnsClient.Timeout = 2 * time.Second
+resp, _, err := dnsClient.Exchange(m, c.DNSServer)
 
-	if err != nil || resp == nil {
-		return nil
-	}
+if err != nil || resp == nil {
+return nil
+}
 
-	var out []byte
-	for _, ans := range resp.Answer {
-		if aaaa, ok := ans.(*dns.AAAA); ok {
-			// استخراج دیتا از ۱۶ بایت آی‌پی IPv6
-			out = append(out, aaaa.AAAA[:]...)
-		}
-	}
-	return out
+// Extract data from IPv6 addresses (16 bytes each)
+var out []byte
+for _, ans := range resp.Answer {
+if aaaa, ok := ans.(*dns.AAAA); ok {
+out = append(out, aaaa.AAAA[:]...)
+}
+}
+return out
 }
