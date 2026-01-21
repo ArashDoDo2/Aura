@@ -8,6 +8,13 @@
 Client (SOCKS5) → Public DNS Resolver → Authoritative DNS Server → Target Service
 ```
 
+```mermaid
+flowchart LR
+    Client["Client (SOCKS5)"] --> Resolver["Public DNS Resolver"]
+    Resolver --> Server["Authoritative DNS Server"]
+    Server --> Target["Target Service"]
+```
+
 **Key Innovation**: All data transmission occurs through DNS AAAA record queries, allowing traffic to traverse networks where only DNS is permitted.
 
 ## ✨ Technical Highlights
@@ -206,6 +213,7 @@ Internal.stopAuraClient()
 ## 📚 Documentation
 
 - **[COMPLETE-ARCHITECTURE.md](COMPLETE-ARCHITECTURE.md)** - Comprehensive system design and protocol details
+- **[TECHNICAL-SPEC.md](TECHNICAL-SPEC.md)** - Architecture spec with sequence diagrams and session state machine
 - **[ANDROID-BUILD.md](ANDROID-BUILD.md)** - Mobile integration guide
 - **[PROJECT-GO.md](PROJECT-GO.md)** - Development documentation
 
