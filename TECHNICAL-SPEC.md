@@ -21,7 +21,7 @@ sequenceDiagram
     Server-->>DNS: AAAA Answer (downstream bytes)
     DNS-->>Client: AAAA Answer (downstream bytes)
 
-    Note over Client,Server: Client repeats with seq increments; polls with seq=ffff for downstream data.
+    Note over Client, Server: Client repeats with seq increments; polls with seq=ffff for downstream data.
 ```
 
 ## Detailed Logic Flow: Sequence Reassembly
