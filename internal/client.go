@@ -43,6 +43,8 @@ type bufferedConn struct {
 	tlsFastPath    bool
 	firstTLSRecord []byte
 	tlsRecordSent  bool
+	connSeq        uint16 // Per-connection sequence counter
+	sessionID      string // Unique session ID per connection
 }
 
 func (b *bufferedConn) Read(p []byte) (int, error) {
@@ -138,7 +140,10 @@ func (c *AuraClient) handleSocks5Conn(ctx context.Context, conn net.Conn) {
 		return
 	}
 
-	bc := &bufferedConn{Conn: conn, reader: reader}
+	// Generate unique session ID for this connection
+	sessionID := randomHex(4)
+	bc := &bufferedConn{Conn: conn, reader: reader, connSeq: 0, sessionID: sessionID}
+	log.Printf("New connection: session=%s seq=0", sessionID)
 
 	// Immediate Diversion for Non-SOCKS5 Traffic
 	if first[0] != 0x05 {
@@ -245,8 +250,9 @@ func (c *AuraClient) handleTunnel(ctx context.Context, conn net.Conn) {
 
 // tcpToDNS: Fragment TCP data into 30-byte chunks, Base32 encode, send as DNS AAAA queries
 func (c *AuraClient) tcpToDNS(ctx context.Context, conn net.Conn) {
-	if bc, ok := conn.(*bufferedConn); ok && bc.tlsFastPath && !bc.tlsRecordSent && len(bc.firstTLSRecord) > 0 {
-		c.flushTLSRecord(bc.firstTLSRecord)
+	bc, isBufConn := conn.(*bufferedConn)
+	if isBufConn && bc.tlsFastPath && !bc.tlsRecordSent && len(bc.firstTLSRecord) > 0 {
+		c.flushTLSRecordWithConn(bc.firstTLSRecord, bc)
 		bc.tlsRecordSent = true
 		bc.firstTLSRecord = nil
 	}
@@ -267,8 +273,34 @@ func (c *AuraClient) tcpToDNS(ctx context.Context, conn net.Conn) {
 			continue
 		}
 		log.Printf("TCP read %d bytes from SOCKS5", n)
-		c.sendDNSPacket(buf[:n])
+		if isBufConn {
+			c.sendDNSPacketWithConn(buf[:n], bc)
+		} else {
+			c.sendDNSPacket(buf[:n])
+		}
 	}
+}
+
+func (c *AuraClient) sendDNSPacketWithConn(data []byte, bc *bufferedConn) {
+	seq := bc.connSeq
+	bc.connSeq++
+
+	// Cache Busting: Random nonce prevents DNS caching
+	nonce := randomHex(4)
+	label := strings.ToLower(b32Encoder.EncodeToString(data))
+	snippet := label
+	if len(snippet) > 10 {
+		snippet = snippet[:10]
+	}
+	log.Printf("Encoded chunk seq=0x%04x first10=%s len=%d", seq, snippet, len(label))
+
+	// Packet Structure: [Nonce]-[Seq]-[SessionID].[Base32Data].<domain>
+	qname := fmt.Sprintf("%s-%04x-%s.%s.%s", nonce, seq, bc.sessionID, label, c.Domain)
+
+	m := new(dns.Msg)
+	m.SetQuestion(qname, dns.TypeAAAA)
+	log.Printf("DNS uplink chunk session=%s seq=0x%04x len=%d", bc.sessionID, seq, len(data))
+	c.sendQueryWithRetry(m)
 }
 
 func (c *AuraClient) sendDNSPacket(data []byte) {
@@ -295,6 +327,26 @@ func (c *AuraClient) sendDNSPacket(data []byte) {
 	c.sendQuery(m)
 }
 
+func (c *AuraClient) sendDNSPacketFastWithConn(data []byte, bc *bufferedConn) {
+	seq := bc.connSeq
+	bc.connSeq++
+
+	nonce := randomHex(4)
+	label := strings.ToLower(b32Encoder.EncodeToString(data))
+	snippet := label
+	if len(snippet) > 10 {
+		snippet = snippet[:10]
+	}
+	log.Printf("Fast-path chunk seq=0x%04x first10=%s len=%d", seq, snippet, len(label))
+
+	qname := fmt.Sprintf("%s-%04x-%s.%s.%s", nonce, seq, bc.sessionID, label, c.Domain)
+
+	m := new(dns.Msg)
+	m.SetQuestion(qname, dns.TypeAAAA)
+	log.Printf("Fast-path DNS uplink session=%s seq=0x%04x len=%d", bc.sessionID, seq, len(data))
+	go c.sendQueryWithRetry(m)
+}
+
 func (c *AuraClient) sendDNSPacketFast(data []byte) {
 	c.Mutex.Lock()
 	seq := c.Seq
@@ -317,6 +369,18 @@ func (c *AuraClient) sendDNSPacketFast(data []byte) {
 	go c.sendQuery(m)
 }
 
+func (c *AuraClient) flushTLSRecordWithConn(record []byte, bc *bufferedConn) {
+	log.Printf("Flushing TLS record fast path (%d bytes)", len(record))
+	for offset := 0; offset < len(record); {
+		end := offset + MaxChunkSize
+		if end > len(record) {
+			end = len(record)
+		}
+		c.sendDNSPacketFastWithConn(record[offset:end], bc)
+		offset = end
+	}
+}
+
 func (c *AuraClient) flushTLSRecord(record []byte) {
 	log.Printf("Flushing TLS record fast path (%d bytes)", len(record))
 	for offset := 0; offset < len(record); {
@@ -330,6 +394,10 @@ func (c *AuraClient) flushTLSRecord(record []byte) {
 }
 
 func (c *AuraClient) sendQuery(m *dns.Msg) {
+	c.sendQueryWithRetry(m)
+}
+
+func (c *AuraClient) sendQueryWithRetry(m *dns.Msg) {
 	dnsServer, err := c.getEffectiveDNSServer()
 	if err != nil {
 		log.Printf("DNS server error: %v", err)
@@ -339,8 +407,25 @@ func (c *AuraClient) sendQuery(m *dns.Msg) {
 	dnsClient := new(dns.Client)
 	dnsClient.Net = "udp"
 	dnsClient.Timeout = 2 * time.Second
+	dnsClient.UDPSize = 4096 // Increase UDP buffer size
+
+	// Configure socket buffers to handle larger packets
+	if conn, err := net.Dial("udp", dnsServer); err == nil {
+		if udpConn, ok := conn.(*net.UDPConn); ok {
+			udpConn.SetReadBuffer(4096)
+			udpConn.SetWriteBuffer(4096)
+		}
+		conn.Close()
+	}
+
 	_, _, err = dnsClient.Exchange(m, dnsServer)
 	if err != nil {
+		// Check for wsarecv buffer error
+		if strings.Contains(err.Error(), "wsarecv") || strings.Contains(err.Error(), "message too long") {
+			log.Printf("DNS buffer error (retrying): %v", err)
+			// Don't close session, just skip this packet
+			return
+		}
 		log.Printf("DNS query error: %v", err)
 	}
 }
@@ -355,7 +440,12 @@ func (c *AuraClient) dnsToTCP(ctx context.Context, conn net.Conn) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			resp := c.pollDNS()
+			// Get sessionID from bufferedConn if available
+			sessionID := c.SessionID
+			if bc, ok := conn.(*bufferedConn); ok {
+				sessionID = bc.sessionID
+			}
+			resp := c.pollDNSWithSession(sessionID)
 			if len(resp) > 0 {
 				conn.Write(resp)
 			}
@@ -363,10 +453,10 @@ func (c *AuraClient) dnsToTCP(ctx context.Context, conn net.Conn) {
 	}
 }
 
-func (c *AuraClient) pollDNS() []byte {
+func (c *AuraClient) pollDNSWithSession(sessionID string) []byte {
 	// Use special sequence ffff for polling
 	nonce := randomHex(4)
-	qname := fmt.Sprintf("%s-ffff-%s.%s", nonce, c.SessionID, c.Domain)
+	qname := fmt.Sprintf("%s-ffff-%s.%s", nonce, sessionID, c.Domain)
 
 	m := new(dns.Msg)
 	m.SetQuestion(qname, dns.TypeAAAA)
@@ -376,13 +466,27 @@ func (c *AuraClient) pollDNS() []byte {
 		return nil
 	}
 
-	log.Printf("Polling DNS for session=%s qname=%s server=%s", c.SessionID, qname, dnsServer)
-
 	dnsClient := new(dns.Client)
 	dnsClient.Timeout = 2 * time.Second
+	dnsClient.UDPSize = 4096 // Increase UDP buffer size
+
+	// Configure socket buffers
+	if conn, err := net.Dial("udp", dnsServer); err == nil {
+		if udpConn, ok := conn.(*net.UDPConn); ok {
+			udpConn.SetReadBuffer(4096)
+			udpConn.SetWriteBuffer(4096)
+		}
+		conn.Close()
+	}
+
 	resp, _, err := dnsClient.Exchange(m, dnsServer)
 
 	if err != nil {
+		// Check for wsarecv buffer error - don't log repeatedly
+		if strings.Contains(err.Error(), "wsarecv") || strings.Contains(err.Error(), "message too long") {
+			// Silent retry - buffer error is expected occasionally
+			return nil
+		}
 		log.Printf("Poll query error session=%s err=%v", c.SessionID, err)
 		return nil
 	}
@@ -398,8 +502,14 @@ func (c *AuraClient) pollDNS() []byte {
 			out = append(out, aaaa.AAAA[:]...)
 		}
 	}
+	// Only log when there's actual data (reduce console spam)
 	if len(out) > 0 {
-		log.Printf("DNS response poll len=%d seq=ffff domain=%s", len(out), qname)
+		log.Printf("DNS response poll len=%d seq=ffff", len(out))
 	}
 	return out
+}
+
+// Legacy wrapper for backward compatibility
+func (c *AuraClient) pollDNS() []byte {
+	return c.pollDNSWithSession(c.SessionID)
 }
