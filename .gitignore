@@ -1,0 +1,51 @@
+# Binaries
+*.exe
+*.so
+*.dll
+*.dylib
+aura-client
+aura-server
+aura-client-*
+aura-server-*
+libaura.*
+
+# Go
+*.test
+*.out
+vendor/
+
+# Android
+*.apk
+*.aar
+*.ap_
+*.aab
+local.properties
+.gradle/
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+*.jks
+*.keystore
+
+# Flutter
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+**/doc/api/
+.flutter_tool_state
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Debug symbols
+build/debug-info/
+*.dSYM/
