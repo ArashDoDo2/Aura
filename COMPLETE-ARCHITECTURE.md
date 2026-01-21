@@ -17,6 +17,13 @@ Aura is a DNS-based tunneling system designed to proxy WhatsApp text messages th
      AAAA records            to your domain             Extract data               e1.whatsapp.net:5222
 ```
 
+```mermaid
+flowchart LR
+    App["Android App<br/>(SOCKS5 Proxy)"] --> Resolver["Public DNS<br/>(1.1.1.1)"]
+    Resolver --> Server["Aura Server<br/>(Authoritative)"]
+    Server --> WhatsApp["WhatsApp<br/>(5222 only)"]
+```
+
 ## Protocol Specification
 
 ### DNS Query Format
