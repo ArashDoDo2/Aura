@@ -362,15 +362,52 @@ func DecodeLabelToData(label string) ([]byte, error) {
 ### Session Management
 - **Session Creation**: First query with new sessionID creates TCP connection to WhatsApp
 - **Session Timeout**: 60 seconds of inactivity closes session
-- **Buffer Management**: Server buffers downstream data until client polls
+- **Background Reader**: Dedicated goroutine per session continuously reads from target
+- **Sequence Ordering**: Server maintains `pendingChunks` map to handle out-of-order packets
+- **TLS Optimization**: Buffers complete ClientHello before transmission (single-write)
 
 **Session Lifecycle** (server.go):
 ```go
 type session struct {
-    conn      net.Conn      // TCP connection to e1.whatsapp.net:5222
-    buffer    []byte        // Pending downstream data
-    lastSeen  time.Time     // For timeout tracking
-    mu        sync.Mutex
+    conn                 net.Conn      // TCP connection to e1.whatsapp.net:5222
+    buffer               []byte        // Pending downstream data
+    lastSeen             time.Time     // For timeout tracking
+    mu                   sync.Mutex
+    pendingChunks        map[uint16][]byte  // Out-of-order packet buffering
+    expectedSeq          uint16             // Next expected sequence number
+    tlsHandshakePending  bool
+    tlsHandshakeExpected int
+    tlsHandshakeBuffer   []byte
+    handshakeDone        bool
+}
+
+// Background reader goroutine per session
+func (s *session) startReader(sid string) {
+    buf := make([]byte, MaxIPv6Payload*10)
+    for {
+        n, err := s.conn.Read(buf)
+        if n > 0 {
+            s.mu.Lock()
+            s.buffer = append(s.buffer, buf[:n]...)
+            s.mu.Unlock()
+        }
+        if err != nil {
+            return
+        }
+    }
+}
+
+// Sequence-aware chunk processing
+func (s *session) processPendingChunks(qf *QueryFields) {
+    for {
+        chunk, ok := s.pendingChunks[s.expectedSeq]
+        if !ok {
+            break
+        }
+        delete(s.pendingChunks, s.expectedSeq)
+        // Process chunk (TLS buffering or direct write)
+        s.expectedSeq++
+    }
 }
 
 // Background cleanup

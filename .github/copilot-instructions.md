@@ -49,7 +49,9 @@ See [internal/server.go](../internal/server.go#L12-L19) for `ParseQueryName` imp
 - Authoritative DNS responder
 - Session management with 60s timeout
 - **Hardcoded**: `WhatsAppHost = "e1.whatsapp.net"` and `WhatsAppPort = 5222`
-- Rejects queries with "media" or "cdn" substrings
+- **Sequence-aware buffering**: `pendingChunks` map orders out-of-order packets
+- **Background reader goroutine**: `startReader()` continuously reads from target connection
+- **TLS handshake optimization**: Buffers complete ClientHello for single-write transmission
 
 ### Client ([internal/client.go](../internal/client.go))
 - SOCKS5 proxy on localhost:1080
@@ -127,10 +129,12 @@ gomobile bind -target=android/arm64,android/amd64 -o aura.aar ./internal
 1. **Base32 encoding**: Always lowercase, no padding (`b32Encoder.WithPadding(base32.NoPadding)`)
 2. **Error handling**: Log and return; server sends DNS error codes (RcodeFormatError, RcodeServerFailure)
 3. **Concurrency**: Session map protected by `sync.Mutex`, per-session locks for conn operations
-4. **Non-blocking I/O**: `SetReadDeadline(10ms)` for downstream reads in server session handling
-5. **DNS library**: github.com/miekg/dns for all DNS operations
-6. **Module name**: `github.com/ArashDoDo2/Aura` (import paths must match)
-7. **Transparent TCP mode**: `handleSocks5Conn` uses `Peek(1)` to detect protocol - if NOT 0x05, immediately divert to `handleTunnel` with `return` to prevent SOCKS5 handshake execution
+4. **Background goroutines**: Server uses `startReader()` goroutine per session for continuous downstream reads
+5. **Sequence ordering**: Server `processPendingChunks()` ensures in-order delivery via `expectedSeq` tracking
+6. **DNS library**: github.com/miekg/dns for all DNS operations
+7. **Module name**: `github.com/ArashDoDo2/Aura` (import paths must match)
+8. **Transparent TCP mode**: `handleSocks5Conn` uses `Peek(1)` to detect protocol - if NOT 0x05, immediately divert to `handleTunnel` with `return` to prevent SOCKS5 handshake execution
+9. **TLS optimization**: Both client and server buffer complete TLS ClientHello for single-write transmission (avoids TCP fragmentation)
 
 ## Testing Workflow
 
