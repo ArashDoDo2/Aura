@@ -10,6 +10,10 @@ Android App (SOCKS5) → Public DNS → Authoritative Server → WhatsApp (port 
 
 **Critical Design Decision**: Port 5222 enforcement = TEXT-ONLY. Blocks media/CDN (port 443) intentionally. This is architectural, not configurable.
 
+**Dual Android Integration Paths**:
+1. **gomobile (MethodChannel)**: `internal/mobile.go` → `.aar` → Kotlin VpnService (legacy, has NDK compatibility issues)
+2. **FFI (Direct)**: `bridge.go` → `libaura.so` → Dart FFI (current, recommended - see [BUILD-FFI-ANDROID.md](../BUILD-FFI-ANDROID.md))
+
 ## Protocol Structure
 
 DNS queries follow strict naming convention:
@@ -50,7 +54,9 @@ See [internal/server.go](../internal/server.go#L12-L19) for `ParseQueryName` imp
 ### Client ([internal/client.go](../internal/client.go))
 - SOCKS5 proxy on localhost:1080
 - **System DNS support**: Empty `DNSServer` uses system resolver (see `getEffectiveDNSServer()`)
-- Sequential polling at 500ms intervals
+- **Dual-mode operation**: Auto-detects SOCKS5 (0x05) vs Transparent TCP
+- **TLS fast-path**: Buffers complete TLS ClientHello for single-write transmission
+- Sequential polling at 100ms intervals
 - Session ID generated per client instance
 
 ### Mobile Bridge ([internal/mobile.go](../internal/mobile.go))
@@ -64,30 +70,53 @@ See [internal/server.go](../internal/server.go#L12-L19) for `ParseQueryName` imp
 
 ### Flutter Integration ([flutter_aura/](../flutter_aura/))
 - Material Design UI with VPN controls
-- MethodChannel bridge: `com.aura.proxy/vpn`
-- Kotlin VpnService wraps Go engine
-- System DNS auto-detection in UI
-- Optional per-app VPN for WhatsApp only
+- **FFI Bridge**: `lib/aura_bridge.dart` → `libaura.so` (direct CGo calls)
+- System DNS auto-detection in UI (leave DNS field empty)
+- No VpnService required for FFI approach
+
+**Alternative**: [AuraMobileClient/](../AuraMobileClient/) uses gomobile `.aar` + Kotlin VpnService (legacy)
 
 ## Build & Deployment
 
-**Standard Go build**:
+**Standard Go build** (all platforms):
 ```bash
+# Server (requires root on Unix for port 53)
 go build -o aura-server ./cmd/server
+sudo ./aura-server -domain yourdomain.com. -addr :53
+
+# Client (standalone, Termux-compatible)
 go build -o aura-client ./cmd/client
+./aura-client -dns "" -domain yourdomain.com.  # System DNS
 ```
 
-**Android .aar**:
-```bash
-gomobile bind -target=android/arm64,android/amd64 -o aura.aar ./internal
-```
+**Android Integration (Choose ONE approach)**:
 
-**Flutter app**:
-```bash
+**Option 1: FFI (Recommended - No NDK issues)**:
+```powershell
+# Prerequisites: Set NDK env vars (see BUILD-FFI-ANDROID.md)
+$env:ANDROID_NDK_HOME = "$env:LOCALAPPDATA\Android\Sdk\ndk\29.0.14206865"
+$env:CC = "$env:ANDROID_NDK_HOME\toolchains\llvm\prebuilt\windows-x86_64\bin\aarch64-linux-android21-clang.cmd"
+$env:CGO_ENABLED = "1"; $env:GOOS = "android"; $env:GOARCH = "arm64"
+
+# Build .so (bridge.go exports StartAura/StopAura via CGo)
+go build -buildmode=c-shared -o libaura.so ./bridge.go
+
+# Deploy to Flutter
+Copy-Item libaura.so flutter_aura\android\app\src\main\jniLibs\arm64-v8a\
 cd flutter_aura
-flutter pub get
-flutter run  # Requires aura.aar in android/app/libs/
+flutter build apk --debug
 ```
+
+**Option 2: gomobile (Legacy - NDK compatibility issues)**:
+```bash
+# Note: May fail with "unsupported Android platform version" on NDK 26+
+gomobile bind -target=android/arm64,android/amd64 -o aura.aar ./internal
+# Copy aura.aar to AuraMobileClient/app/libs/
+```
+
+**Key Differences**:
+- **FFI**: Direct CGo → Dart FFI, simpler, no MethodChannel, fewer layers
+- **gomobile**: JNI → Kotlin → MethodChannel → Dart, more complex, NDK version-sensitive
 
 **Configuration**: Flags OR environment variables
 - Server: `AURA_DOMAIN`, `AURA_LISTEN_ADDR`
@@ -98,8 +127,10 @@ flutter run  # Requires aura.aar in android/app/libs/
 1. **Base32 encoding**: Always lowercase, no padding (`b32Encoder.WithPadding(base32.NoPadding)`)
 2. **Error handling**: Log and return; server sends DNS error codes (RcodeFormatError, RcodeServerFailure)
 3. **Concurrency**: Session map protected by `sync.Mutex`, per-session locks for conn operations
-4. **Non-blocking I/O**: `SetReadDeadline(10ms)` for downstream reads ([internal/server.go](../internal/server.go#L139))
+4. **Non-blocking I/O**: `SetReadDeadline(10ms)` for downstream reads in server session handling
 5. **DNS library**: github.com/miekg/dns for all DNS operations
+6. **Module name**: `github.com/ArashDoDo2/Aura` (import paths must match)
+7. **Transparent TCP mode**: `handleSocks5Conn` uses `Peek(1)` to detect protocol - if NOT 0x05, immediately divert to `handleTunnel` with `return` to prevent SOCKS5 handshake execution
 
 ## Testing Workflow
 
@@ -132,26 +163,78 @@ go run ./cmd/client -dns YOUR_SERVER_IP:53 -domain example.com.
 
 ## Flutter + Go Bridge
 
-**Architecture**: Flutter (Dart) ↔ MethodChannel ↔ Kotlin ↔ JNI ↔ Go
+**FFI Architecture** (Recommended):
+```
+Flutter (Dart) → dart:ffi → libaura.so (CGo) → Go Client
+```
 
 **Key files**:
-- [flutter_aura/lib/vpn_manager.dart](../flutter_aura/lib/vpn_manager.dart): MethodChannel client
-- [AuraVpnService.kt](../flutter_aura/android/app/src/main/kotlin/com/aura/flutter_aura/AuraVpnService.kt): VpnService + Go bridge
-- [MainActivity.kt](../flutter_aura/android/app/src/main/kotlin/com/aura/flutter_aura/MainActivity.kt): MethodChannel handler
+- [bridge.go](../bridge.go): CGo exports `StartAura`/`StopAura` for FFI
+- [flutter_aura/lib/aura_bridge.dart](../flutter_aura/lib/aura_bridge.dart): Dart FFI bindings
+- [flutter_aura/lib/main.dart](../flutter_aura/lib/main.dart): UI with DNS/domain inputs
 
-**MethodChannel protocol**:
+**gomobile Architecture** (Legacy):
+```
+Flutter (Dart) ↔ MethodChannel ↔ Kotlin ↔ JNI ↔ Go
+```
+
+**Key files**:
+- [internal/mobile.go](../internal/mobile.go): gomobile exports for `.aar`
+- [AuraMobileClient/](../AuraMobileClient/): Complete Android app with VpnService
+
+**MethodChannel protocol** (gomobile only):
 ```dart
 startVpn({dnsServer: String, domain: String}) -> "" or error
 stopVpn() -> "" or error
 getStatus() -> "running" | "stopped"
 ```
 
-**VPN packet forwarding**: Basic implementation in `AuraVpnService.forwardPackets()` - TODO: full SOCKS5 integration
-
 ## Documentation Structure
 
 - [COMPLETE-ARCHITECTURE.md](../COMPLETE-ARCHITECTURE.md): Deep dive into protocol and Android VPN setup
 - [FLUTTER-BUILD.md](../FLUTTER-BUILD.md): Complete Flutter + Go build guide
+- [BUILD-FFI-ANDROID.md](../BUILD-FFI-ANDROID.md): FFI approach (recommended, no NDK issues)
 - [ANDROID-BUILD.md](../ANDROID-BUILD.md): Pure Android (no Flutter) build instructions
 - [SYSTEM-DNS-IMPLEMENTATION.md](../SYSTEM-DNS-IMPLEMENTATION.md): System resolver integration details
 - [PROJECT-GO.md](../PROJECT-GO.md): Persian documentation (راهنمای فارسی)
+
+## Troubleshooting
+
+### gomobile build fails
+```powershell
+# NDK version conflicts - use FFI approach instead (BUILD-FFI-ANDROID.md)
+# Or downgrade NDK: Android Studio → SDK Manager → NDK 25.2.9519653
+```
+
+### Flutter FFI build fails
+```powershell
+# Check NDK paths
+$env:ANDROID_NDK_HOME = "$env:LOCALAPPDATA\Android\Sdk\ndk\29.0.14206865"
+Get-Item $env:ANDROID_NDK_HOME  # Should exist
+
+# Verify .so file
+Get-Item libaura.so | Select-Object Name, Length  # Should be ~7 MB
+
+# Clean rebuild
+flutter clean
+flutter pub get
+flutter build apk --debug
+```
+
+### Client "domain must end with dot" error
+```bash
+# CORRECT: example.com.
+# WRONG: example.com
+./aura-client -domain example.com.  # Always include trailing dot
+```
+
+### Server not responding to queries
+```powershell
+# Check DNS server running
+sudo netstat -ulnp | grep :53
+
+# Test direct query
+dig @YOUR_SERVER_IP test.yourdomain.com. AAAA
+
+# Check server logs for "does not end with domain" errors
+```

@@ -130,25 +130,37 @@ func (c *AuraClient) handleSocks5Conn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
 	reader := bufio.NewReader(conn)
+
+	// Strict Peek & Branch: Check first byte to determine protocol
 	first, err := reader.Peek(1)
 	if err != nil {
+		log.Printf("Failed to peek first byte: %v", err)
 		return
 	}
 
 	bc := &bufferedConn{Conn: conn, reader: reader}
+
+	// Immediate Diversion for Non-SOCKS5 Traffic
 	if first[0] != 0x05 {
+		// Log transparent mode activation
+		log.Printf("Non-SOCKS5 traffic detected (0x%02x), switching to Transparent Mode", first[0])
+
+		// If TLS ClientHello detected, buffer the complete record
 		if first[0] == 0x16 {
 			if err := c.bufferTLSRecord(reader, bc); err != nil {
+				log.Printf("Failed to buffer TLS record: %v", err)
 				return
 			}
+			log.Printf("TLS handshake buffered, ready for fast-path transmission")
 		}
 
-		log.Printf("Transparent TCP stream detected, skipping SOCKS handshake")
+		// Handle tunnel with default target (WhatsApp proxy mode)
 		c.handleTunnel(ctx, bc)
+		// CRITICAL: Return immediately to prevent fall-through to SOCKS5 logic
 		return
 	}
 
-	// SOCKS5 Handshake
+	// SOCKS5 Handshake (only executed for SOCKS5 protocol 0x05)
 	buf := make([]byte, 262)
 	if _, err := io.ReadFull(reader, buf[:2]); err != nil {
 		return
@@ -375,7 +387,7 @@ func (c *AuraClient) pollDNS() []byte {
 		return nil
 	}
 
-	if err != nil || resp == nil {
+	if resp == nil {
 		return nil
 	}
 

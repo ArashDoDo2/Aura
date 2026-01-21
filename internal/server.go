@@ -3,8 +3,10 @@ package internal
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 	"log"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -67,6 +69,8 @@ type session struct {
 	buffer               []byte
 	lastSeen             time.Time
 	mu                   sync.Mutex
+	pendingChunks        map[uint16][]byte
+	expectedSeq          uint16
 	tlsHandshakePending  bool
 	tlsHandshakeExpected int
 	tlsHandshakeBuffer   []byte
@@ -75,27 +79,41 @@ type session struct {
 }
 
 func (s *session) handleUpstreamData(data []byte, qf *QueryFields) {
-	if s.handshakeDone {
-		s.writeDirect(data, qf)
+	seq, err := parseSeq(qf.Seq)
+	if err != nil {
+		log.Printf("Invalid sequence %s: %v", qf.Seq, err)
 		return
 	}
 
-	if !s.tlsHandshakePending {
+	if !s.tlsHandshakePending && !s.handshakeDone {
 		if len(data) == 0 || data[0] != 0x16 {
-			// Not a TLS handshake / abort buffering
 			s.handshakeDone = true
-			s.writeDirect(data, qf)
-			return
+		} else {
+			s.tlsHandshakePending = true
+			s.tlsHandshakeExpected = -1
+			s.expectedSeq = seq
 		}
-		s.tlsHandshakePending = true
+	}
+	if s.expectedSeq == 0 {
+		s.expectedSeq = seq
 	}
 
-	s.tlsHandshakeBuffer = append(s.tlsHandshakeBuffer, data...)
-	if s.tlsHandshakeExpected < 0 && len(s.tlsHandshakeBuffer) >= 5 {
-		s.tlsHandshakeExpected = 5 + int(binary.BigEndian.Uint16(s.tlsHandshakeBuffer[3:5]))
+	if s.pendingChunks == nil {
+		s.pendingChunks = make(map[uint16][]byte)
 	}
-	s.logHandshakeProgress(qf)
-	s.flushHandshakeIfReady(qf)
+	s.queueChunk(seq, data, qf)
+}
+
+func (s *session) queueChunk(seq uint16, data []byte, qf *QueryFields) {
+	if existing, ok := s.pendingChunks[seq]; ok {
+		s.pendingChunks[seq] = append(existing, data...)
+	} else {
+		s.pendingChunks[seq] = append([]byte(nil), data...)
+	}
+	if len(s.pendingChunks) == 1 && s.expectedSeq == 0 {
+		s.expectedSeq = seq
+	}
+	s.processPendingChunks(qf)
 }
 
 func (s *session) logHandshakeProgress(qf *QueryFields) {
@@ -107,6 +125,32 @@ func (s *session) logHandshakeProgress(qf *QueryFields) {
 		total = len(s.tlsHandshakeBuffer)
 	}
 	log.Printf("Handshake buffering: collected %d/%d bytes for session=%s", len(s.tlsHandshakeBuffer), total, qf.SessionID)
+}
+
+func (s *session) processPendingChunks(qf *QueryFields) {
+	for {
+		chunk, ok := s.pendingChunks[s.expectedSeq]
+		if !ok {
+			break
+		}
+		delete(s.pendingChunks, s.expectedSeq)
+		if !s.handshakeDone {
+			s.tlsHandshakeBuffer = append(s.tlsHandshakeBuffer, chunk...)
+			if s.tlsHandshakeExpected < 0 && len(s.tlsHandshakeBuffer) >= 5 {
+				s.tlsHandshakeExpected = 5 + int(binary.BigEndian.Uint16(s.tlsHandshakeBuffer[3:5]))
+			}
+			s.logHandshakeProgress(qf)
+			s.flushHandshakeIfReady(qf)
+			if !s.handshakeDone {
+				s.expectedSeq++
+				continue
+			}
+		}
+		if s.handshakeDone {
+			s.writeDirect(chunk, qf)
+		}
+		s.expectedSeq++
+	}
 }
 
 func (s *session) flushHandshakeIfReady(qf *QueryFields) {
@@ -156,6 +200,29 @@ func (s *session) setNoDelay(enabled bool) {
 			s.noDelayWasSet = true
 		}
 	}
+}
+
+func (s *session) startReader(sid string) {
+	buf := make([]byte, MaxIPv6Payload*10)
+	for {
+		n, err := s.conn.Read(buf)
+		if n > 0 {
+			s.mu.Lock()
+			s.buffer = append(s.buffer, buf[:n]...)
+			s.mu.Unlock()
+		}
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("Target read error session=%s: %v", sid, err)
+			}
+			return
+		}
+	}
+}
+
+func parseSeq(value string) (uint16, error) {
+	v, err := strconv.ParseUint(value, 16, 16)
+	return uint16(v), err
 }
 
 type Server struct {
@@ -248,17 +315,6 @@ func (s *Server) handleDNS(w dns.ResponseWriter, r *dns.Msg) {
 		}
 	}
 
-	// Read downstream data (non-blocking)
-	buf := make([]byte, MaxIPv6Payload*10)
-	sess.conn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
-	n, _ := sess.conn.Read(buf)
-	if n > 0 {
-		sess.buffer = append(sess.buffer, buf[:n]...)
-		log.Printf("Received %d bytes from Target for session=%s", n, qf.SessionID)
-		log.Printf("Buffered %d bytes from WhatsApp session=%s", n, qf.SessionID)
-	}
-	sess.conn.SetReadDeadline(time.Time{})
-
 	// Pack data into IPv6 responses (limit number per reply)
 	for len(sess.buffer) >= MaxIPv6Payload && len(m.Answer) < MaxAAAAPerResponse {
 		chunk := sess.buffer[:MaxIPv6Payload]
@@ -315,10 +371,12 @@ func (s *Server) getSession(sid string, qname string) (*session, error) {
 	}
 
 	sess := &session{
-		conn:     conn,
-		lastSeen: time.Now(),
+		conn:          conn,
+		lastSeen:      time.Now(),
+		pendingChunks: make(map[uint16][]byte),
 	}
 	s.sessions[sid] = sess
+	go sess.startReader(sid)
 	log.Printf("New session: %s", sid)
 	return sess, nil
 }
