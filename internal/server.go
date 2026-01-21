@@ -60,6 +60,7 @@ const (
 	WhatsAppHost       = "e1.whatsapp.net"
 	WhatsAppPort       = 5222 // Default text-only port to filter media/CDN traffic
 	SessionTimeout     = 60 * time.Second
+	InitialTimeout     = 2 * time.Second
 	MaxIPv6Payload     = 16
 	MaxAAAAPerResponse = 16 // Cap AAAA records per DNS response
 )
@@ -71,6 +72,7 @@ type session struct {
 	mu                   sync.Mutex
 	pendingChunks        map[uint16][]byte
 	expectedSeq          uint16
+	initialSeqWaitStart  time.Time
 	tlsHandshakePending  bool
 	tlsHandshakeExpected int
 	tlsHandshakeBuffer   []byte
@@ -85,23 +87,34 @@ func (s *session) handleUpstreamData(data []byte, qf *QueryFields) {
 		return
 	}
 
-	if !s.tlsHandshakePending && !s.handshakeDone {
+	if !s.handshakeDone && s.expectedSeq == 0 && seq != s.expectedSeq {
+		if s.initialSeqWaitStart.IsZero() {
+			s.initialSeqWaitStart = time.Now()
+		} else if time.Since(s.initialSeqWaitStart) > InitialTimeout {
+			log.Printf("Initial sequence timeout session=%s expected=0000 saw=%s; closing session", qf.SessionID, qf.Seq)
+			s.conn.Close()
+			s.pendingChunks = nil
+			return
+		}
+	}
+
+	if !s.tlsHandshakePending && !s.handshakeDone && seq == s.expectedSeq {
 		if len(data) == 0 || data[0] != 0x16 {
 			s.handshakeDone = true
 		} else {
 			s.tlsHandshakePending = true
 			s.tlsHandshakeExpected = -1
-			s.expectedSeq = seq
 		}
-	}
-	if s.expectedSeq == 0 {
-		s.expectedSeq = seq
 	}
 
 	if s.pendingChunks == nil {
 		s.pendingChunks = make(map[uint16][]byte)
 	}
 	s.queueChunk(seq, data, qf)
+
+	if s.expectedSeq != 0 {
+		s.initialSeqWaitStart = time.Time{}
+	}
 }
 
 func (s *session) queueChunk(seq uint16, data []byte, qf *QueryFields) {
@@ -109,9 +122,6 @@ func (s *session) queueChunk(seq uint16, data []byte, qf *QueryFields) {
 		s.pendingChunks[seq] = append(existing, data...)
 	} else {
 		s.pendingChunks[seq] = append([]byte(nil), data...)
-	}
-	if len(s.pendingChunks) == 1 && s.expectedSeq == 0 {
-		s.expectedSeq = seq
 	}
 	s.processPendingChunks(qf)
 }
@@ -373,6 +383,7 @@ func (s *Server) getSession(sid string, qname string) (*session, error) {
 	sess := &session{
 		conn:          conn,
 		lastSeen:      time.Now(),
+		expectedSeq:   0,
 		pendingChunks: make(map[uint16][]byte),
 	}
 	s.sessions[sid] = sess
